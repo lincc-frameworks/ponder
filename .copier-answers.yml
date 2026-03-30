@@ -1,0 +1,25 @@
+# Changes here will be overwritten by Copier
+_commit: v2.2.0
+_src_path: gh:lincc-frameworks/python-project-template
+author_email: maxwest@uw.edu
+author_name: lincc-frameworks
+create_example_module: true
+custom_install: custom
+enforce_style:
+- black
+- isort
+failure_notification: []
+include_benchmarks: false
+include_docs: false
+mypy_type_checking: none
+package_name: ponder
+project_description: ''
+project_license: BSD
+project_name: ponder
+project_organization: dirac-institute
+python_versions:
+- '3.10'
+- '3.11'
+- '3.12'
+- '3.13'
+test_lowest_version: none
