@@ -17,6 +17,9 @@ classifiers = [
 dynamic = ["version"]
 requires-python = ">=3.10"
 dependencies = [
+    "astropy",
+    "pandas",
+    "sorcha",
 ]
 
 [project.urls]
@@ -59,3 +62,6 @@ line_length = 110
 
 [tool.coverage.run]
 omit=["src/ponder/_version.py"]
+
+[project.scripts]
+ponder = "ponder.runner:main"
