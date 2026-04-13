@@ -57,7 +57,8 @@ def diff_comets(comets, prev_hashes):
 # -- comet -> sorcha format converters --
 
 
-def comets_to_sorcha_inputs(comets_json, ids, orbits_out, physparams_out):
+def comets_to_sorcha_inputs(comets_json, ids):
+    # TODO: potentially refactor so that it only does the conversion once
     df = pd.DataFrame(comets_json)
 
     # filter to requested ids
@@ -80,7 +81,7 @@ def comets_to_sorcha_inputs(comets_json, ids, orbits_out, physparams_out):
                 "Day_of_perihelion",
             ]
         ):
-            print(f"  [warn] dropping bad epoch: {row.get('Designation_and_name')}")
+            # print(f"  [warn] dropping bad epoch: {row.get('Designation_and_name')}")
             bad.append(r)
             continue
 
@@ -89,14 +90,13 @@ def comets_to_sorcha_inputs(comets_json, ids, orbits_out, physparams_out):
         # preserve fractional day for perihelion time precision
         tp_day_int = int(row["Day_of_perihelion"])
         tp_day_frac = row["Day_of_perihelion"] - tp_day_int
-        tp_strings.append(
-            (f"{int(row['Year_of_perihelion'])}-{int(row['Month_of_perihelion'])}-{tp_day_int}", tp_day_frac)
-        )
+        year_str = f"{int(row['Year_of_perihelion']):04d}"
+        tp_strings.append((f"{year_str}-{int(row['Month_of_perihelion'])}-{tp_day_int}", tp_day_frac))
 
     df = df.drop(bad).reset_index(drop=True)
 
     df["epochMJD_TDB"] = Time(epoch_strings).mjd
-    df["t_p_MJD_TDB"] = Time([s for s, _ in tp_strings]).mjd + [f for _, f in tp_strings]
+    df["t_p_MJD_TDB"] = Time([s for s, _ in tp_strings], format="iso").mjd + [f for _, f in tp_strings]
     df["FORMAT"] = "COM"
 
     # -- orbits file --
@@ -136,8 +136,38 @@ def comets_to_sorcha_inputs(comets_json, ids, orbits_out, physparams_out):
     return orbs, phys
 
 
+# -- DB helpers --
+
+
+def extract_new_pointings(db_path, last_mjd, out_path):
+    if out_path.exists():
+        out_path.unlink()
+    src = sqlite3.connect(db_path)
+    dst = sqlite3.connect(out_path)
+    # sql = src.execute(
+    #     "SELECT sql FROM sqlite_master WHERE type='table' AND name='observations'"
+    # )
+    # print(sql.fetchone())
+    # dst.execute(sql.fetchone[0])
+    df = pd.read_sql_query(f"SELECT * FROM observations WHERE observationStartMJD > {last_mjd}", src)
+    num_rows = len(df)
+    print(num_rows, " new pointings")
+    if num_rows > 0:
+        df.to_sql("observations", dst, index=False)
+    src.close()
+    dst.close()
+    return num_rows
+
+
 def db_max_mjd(db_path):
     con = sqlite3.connect(db_path)
     val = con.execute("SELECT MAX(observationStartMJD) FROM observations").fetchone()[0]
     con.close()
     return val or 0.0
+
+
+def db_count(db_path):
+    con = sqlite3.connect(db_path)
+    n = con.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+    con.close()
+    return n
