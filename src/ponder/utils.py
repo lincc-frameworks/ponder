@@ -32,17 +32,17 @@ def hash_orbit(comet):
     return hashlib.md5(key.encode()).hexdigest()
 
 
-def diff_comets(comets, prev_hashes):
+def diff_objects(objects, prev_hashes):
     """
-    Given a list of comets and a dict of previous comet hashes, return lists of new, updated, and unchanged comets.
+    Given a list of objects and a dict of previous comet hashes, return lists of new, updated, and unchanged comets.
 
     Parameters:
-    - comets: TODO: figure out what this is
+    - objects: TODO: figure out what this is
     - prev_hashes: dict of previous comet hashes, keyed by comet ID
     """
     # TODO: is there a way to numpyify this to make it faster?
     new, updated, unchanged = [], [], []
-    for c in comets:
+    for c in objects:
         oid = obj_id(c)
         h = hash_orbit(c)
         if oid not in prev_hashes:
@@ -52,6 +52,58 @@ def diff_comets(comets, prev_hashes):
         else:
             unchanged.append(oid)
     return new, updated, unchanged
+
+
+def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
+    df = pd.DataFrame(mpcorb_json)
+
+    id_col = df["Principal_desig"]
+
+    df = df[id_col.isin(ids)].copy()
+
+    orbs = df[
+        [
+            "Principal_desig",
+            "a",
+            "e",
+            "i",
+            "Node",
+            "Peri",
+            "M",
+            "Epoch",
+        ]
+    ]
+
+    phys = df[
+        [
+            "Principal_desig",
+            "H",
+        ]
+    ]
+
+    orbs["Epoch"] = orbs["Epoch"] - 2400000.5
+
+    orbs.rename(
+        columns={
+            "Principal_desig": "ObjID",
+            "i": "inc",
+            "Node": "node",
+            "Peri": "argPeri",
+            "M": "ma",
+            "Epoch": "epochMJD_TDB",
+        },
+        inplace=True,
+    )
+
+    phys.rename(
+        columns={
+            "Principal_desig": "ObjID",
+            "H": "H_r",
+        },
+        inplace=True,
+    )
+
+    return orbs, phys
 
 
 # -- comet -> sorcha format converters --
