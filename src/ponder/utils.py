@@ -1,6 +1,7 @@
 import hashlib
 import sqlite3
 
+import numpy as np
 import pandas as pd
 from astropy.time import Time
 
@@ -24,7 +25,11 @@ ORBIT_FIELDS = [
 
 
 def obj_id(comet):
-    return comet.get("Provisional_packed_desig") or comet.get("Designation_and_name")
+    return (
+        comet.get("Provisional_packed_desig")
+        or comet.get("Designation_and_name")
+        or comet.get("Principal_desig")
+    )
 
 
 def hash_orbit(comet):
@@ -58,7 +63,6 @@ def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
     df = pd.DataFrame(mpcorb_json)
 
     id_col = df["Principal_desig"]
-
     df = df[id_col.isin(ids)].copy()
 
     orbs = df[
@@ -82,6 +86,8 @@ def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
     ]
 
     orbs["Epoch"] = orbs["Epoch"] - 2400000.5
+    orbs["FORMAT"] = "KEP"
+    phys["g-r"] = 0.5
 
     orbs.rename(
         columns={

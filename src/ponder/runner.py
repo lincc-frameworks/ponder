@@ -48,7 +48,7 @@ def run_sorcha(orbits, physparams, output, db, config):
     )
 
 
-def setup_id_set(objects, ids, job_name, time):
+def setup_id_set(objects, ids, job_name, time, comet):
     if len(ids) == 0:
         print(f"  [skipping {job_name} — no objects to process]")
         return
@@ -57,7 +57,10 @@ def setup_id_set(objects, ids, job_name, time):
     physpar_path = WORK_DIR / f"job_{job_name}_physparams.csv"
     out_path = RESULTS_DIR / f"{time[:10]}_job_{job_name}.csv"
 
-    orbs, phys = comets_to_sorcha_inputs(objects, ids)
+    if comet:
+        orbs, phys = comets_to_sorcha_inputs(objects, ids)
+    else:
+        orbs, phys = mpcorb_to_sorcha_inputs(objects, ids)
     orbs.to_csv(orbits_path, index=False)
     phys.to_csv(physpar_path, index=False)
 
@@ -68,6 +71,7 @@ def run_ponder(
     db_path,
     object_path,
     config_path,
+    comet,
 ):
     """Run Ponder on the given configs."""
     db_path = Path(db_path)
@@ -101,11 +105,11 @@ def run_ponder(
     # TODO: better name
     #  -- job A: new pointings * unchanged + new objects --
     job_a_ids = set(unchanged_ids) | set(new_ids)
-    job_a_inputs = setup_id_set(objects, job_a_ids, "A", ts)
+    job_a_inputs = setup_id_set(objects, job_a_ids, "A", ts, comet)
     if job_a_inputs:
         orbits, params, out_path = job_a_inputs
         run_sorcha(orbits, params, out_path, new_pts_db, config_path)
 
-    updated_job_ids = setup_id_set(objects, updated_ids, "updated", ts)
+    updated_job_ids = setup_id_set(objects, updated_ids, "updated", ts, comet)
     if updated_job_ids:
         run_sorcha(*updated_job_ids, db_path, config_path)
