@@ -12,11 +12,10 @@ WORK_DIR = Path("work")
 RESULTS_DIR = Path("results")
 
 
-def first_run_setup(comets_path, state, db_path):
+def first_run_setup(objects, state, db_path):
     """If this is the first run, initialize state and hashes files."""
     print("First run — building baseline hashes.")
-    comets = json.loads(comets_path.read_text())
-    prev_hashes = {obj_id(c): hash_orbit(c) for c in comets}
+    prev_hashes = {obj_id(c): hash_orbit(c) for c in objects}
     state["last_mjd"] = 0.0
     HASHES_FILE.write_text(json.dumps(prev_hashes))
     STATE_FILE.write_text(json.dumps(state))
@@ -49,7 +48,7 @@ def run_sorcha(orbits, physparams, output, db, config):
     )
 
 
-def setup_id_set(objects, ids, job_name, time):
+def setup_id_set(objects, ids, job_name, time, comet):
     if len(ids) == 0:
         print(f"  [skipping {job_name} — no objects to process]")
         return
@@ -58,7 +57,10 @@ def setup_id_set(objects, ids, job_name, time):
     physpar_path = WORK_DIR / f"job_{job_name}_physparams.csv"
     out_path = RESULTS_DIR / f"{time[:10]}_job_{job_name}.csv"
 
-    orbs, phys = comets_to_sorcha_inputs(objects, ids)
+    if comet:
+        orbs, phys = comets_to_sorcha_inputs(objects, ids)
+    else:
+        orbs, phys = mpcorb_to_sorcha_inputs(objects, ids)
     orbs.to_csv(orbits_path, index=False)
     phys.to_csv(physpar_path, index=False)
 
@@ -67,12 +69,13 @@ def setup_id_set(objects, ids, job_name, time):
 
 def run_ponder(
     db_path,
-    comets_path,
+    object_path,
     config_path,
+    comet,
 ):
     """Run Ponder on the given configs."""
     db_path = Path(db_path)
-    comets_path = Path(comets_path)
+    object_path = Path(object_path)
     config_path = Path(config_path)
 
     WORK_DIR.mkdir(exist_ok=True)
@@ -82,15 +85,16 @@ def run_ponder(
     state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {"last_mjd": 0.0}
     prev_hashes = json.loads(HASHES_FILE.read_text()) if HASHES_FILE.exists() else {}
 
+    objects = json.loads(object_path.read_text())
+
     if not prev_hashes:
-        first_run_setup(comets_path, state, db_path)
+        first_run_setup(objects, state, db_path)
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"\n[{ts}] Starting cycle")
 
     # -- load and diff inputs --
-    comets = json.loads(comets_path.read_text())
-    new_ids, updated_ids, unchanged_ids = diff_comets(comets, prev_hashes)
+    new_ids, updated_ids, unchanged_ids = diff_objects(objects, prev_hashes)
     print(f"  Comets — new: {len(new_ids)}  updated: {len(updated_ids)}  " f"unchanged: {len(unchanged_ids)}")
 
     new_pts_db = WORK_DIR / "new_pointings.db"
@@ -101,11 +105,11 @@ def run_ponder(
     # TODO: better name
     #  -- job A: new pointings * unchanged + new objects --
     job_a_ids = set(unchanged_ids) | set(new_ids)
-    job_a_inputs = setup_id_set(comets, job_a_ids, "A", ts)
+    job_a_inputs = setup_id_set(objects, job_a_ids, "A", ts, comet)
     if job_a_inputs:
         orbits, params, out_path = job_a_inputs
         run_sorcha(orbits, params, out_path, new_pts_db, config_path)
 
-    updated_job_ids = setup_id_set(comets, updated_ids, "updated", ts)
+    updated_job_ids = setup_id_set(objects, updated_ids, "updated", ts, comet)
     if updated_job_ids:
         run_sorcha(*updated_job_ids, db_path, config_path)
