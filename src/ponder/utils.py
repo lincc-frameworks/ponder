@@ -1,8 +1,10 @@
+import gzip
 import hashlib
 import sqlite3
 
 import numpy as np
 import pandas as pd
+import requests
 from astropy.time import Time
 
 # orbital element fields - a change in any of these triggers a full-history rerun
@@ -19,6 +21,9 @@ ORBIT_FIELDS = [
     "Epoch_month",
     "Epoch_day",
 ]
+
+MPCORB_URL = "https://www.minorplanetcenter.net/Extended_Files/mpcorb_extended.json.gz"
+MPCCOM_URL = "https://www.minorplanetcenter.net/Extended_Files/allcometels.json.gz"
 
 
 # -- comet diff helpers --
@@ -229,3 +234,23 @@ def db_count(db_path):
     n = con.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
     con.close()
     return n
+
+
+def get_current_orbits(date_str, work_dir, comet=False):
+    file_type = "comet" if comet else "asteroid"
+    orbits_gz_path = work_dir / f"{file_type}_orbits_{date_str}.json.gz"
+    orbits_uc_path = work_dir / f"{file_type}_orbits_{date_str}.json"
+    fetch_url = MPCCOM_URL if comet else MPCORB_URL
+    print(f"Fetching orbits from {fetch_url}...")
+    r = requests.get(fetch_url)
+    if r.status_code != 200:
+        raise Exception(f"Failed to fetch orbits: {r.status_code}")
+    print(f"Writing orbits to {orbits_gz_path}...")
+    with open(orbits_gz_path, "wb") as f:
+        f.write(r.content)
+    print(f"Orbits saved to {orbits_gz_path}")
+
+    with gzip.open(orbits_gz_path, "rt") as f_in:
+        with open(orbits_uc_path, "w") as f_out:
+            f_out.write(f_in.read())
+    print(f"Uncompressed orbits saved to {orbits_uc_path}")

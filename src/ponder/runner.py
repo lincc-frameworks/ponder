@@ -113,3 +113,8 @@ def run_ponder(
     updated_job_ids = setup_id_set(objects, updated_ids, "updated", ts, comet)
     if updated_job_ids:
         run_sorcha(*updated_job_ids, db_path, config_path)
+
+    # -- persist state for next run --
+    last_mjd = db_max_mjd(db_path)
+    state["last_mjd"] = last_mjd
+    STATE_FILE.write_text(json.dumps(state))
