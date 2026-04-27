@@ -254,3 +254,5 @@ def get_current_orbits(date_str, work_dir, comet=False):
         with open(orbits_uc_path, "w") as f_out:
             f_out.write(f_in.read())
     print(f"Uncompressed orbits saved to {orbits_uc_path}")
+
+    return orbits_uc_path
