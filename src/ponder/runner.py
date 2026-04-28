@@ -102,14 +102,18 @@ def run_ponder(
     total_pts = db_count(db_path)
     print(f"  Pointings — new: {n_new_pts}  total: {total_pts}")
 
-    # TODO: better name
-    #  -- job A: new pointings * unchanged + new objects --
-    job_a_ids = set(unchanged_ids) | set(new_ids)
-    job_a_inputs = setup_id_set(objects, job_a_ids, "A", ts, comet)
-    if job_a_inputs:
-        orbits, params, out_path = job_a_inputs
+    #  -- job unchanged_and_new: new pointings * unchanged + new objects --
+    job_uan_ids = set(unchanged_ids) | set(new_ids)
+    job_uan_inputs = setup_id_set(objects, job_uan_ids, "unchanged_and_new", ts, comet)
+    if job_uan_inputs:
+        orbits, params, out_path = job_uan_inputs
         run_sorcha(orbits, params, out_path, new_pts_db, config_path)
 
     updated_job_ids = setup_id_set(objects, updated_ids, "updated", ts, comet)
     if updated_job_ids:
         run_sorcha(*updated_job_ids, db_path, config_path)
+
+    # -- persist state for next run --
+    last_mjd = db_max_mjd(db_path)
+    state["last_mjd"] = last_mjd
+    STATE_FILE.write_text(json.dumps(state))
