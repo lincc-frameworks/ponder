@@ -27,6 +27,8 @@ def main():
     if not orbit_path:
         print("Error: Must provide --orbits or --download_orbits")
         return
+    if not args.db or not args.config:
+        parser.error("--db and --config are required to run analysis")
     if args.comet:
         print("Running comet analysis")
     else:
