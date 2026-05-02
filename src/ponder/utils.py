@@ -245,6 +245,7 @@ def get_current_orbits(date_str, work_dir, comet=False):
     r = requests.get(fetch_url)
     if r.status_code != 200:
         raise Exception(f"Failed to fetch orbits: {r.status_code}")
+    work_dir.mkdir(parents=True, exist_ok=True)
     print(f"Writing orbits to {orbits_gz_path}...")
     with open(orbits_gz_path, "wb") as f:
         f.write(r.content)
