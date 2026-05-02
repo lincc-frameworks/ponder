@@ -117,3 +117,10 @@ def run_ponder(
     last_mjd = db_max_mjd(db_path)
     state["last_mjd"] = last_mjd
     STATE_FILE.write_text(json.dumps(state))
+
+
+def main():
+    """Compatibility wrapper for generated console scripts."""
+    from .__main__ import main as cli_main
+
+    return cli_main()
