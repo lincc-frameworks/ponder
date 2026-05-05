@@ -18,6 +18,52 @@ def main():
     parser.add_argument(
         "--download_orbits", action="store_true", help="Whether to download the latest orbits from MPC"
     )
+    parser.add_argument(
+        "--no-filter-orbits", action="store_true", help="Disable the default orbit-catalog filter"
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=5000,
+        help="Rows per resumable Sorcha chunk. Use 0 to run one legacy Sorcha job.",
+    )
+    parser.add_argument(
+        "--sorcha-workers",
+        type=int,
+        default=1,
+        help="Number of Sorcha chunks to run in parallel",
+    )
+    parser.add_argument(
+        "--sorcha-timeout",
+        type=float,
+        help="Optional per-chunk Sorcha timeout in seconds",
+    )
+    parser.add_argument(
+        "--debug-failed-chunk-size",
+        type=int,
+        default=0,
+        help="If a Sorcha chunk fails, split it into this many rows per debug subchunk",
+    )
+    parser.add_argument(
+        "--no-resume-chunks",
+        action="store_true",
+        help="Rerun chunks even if matching completed chunk markers already exist",
+    )
+    parser.add_argument(
+        "--only-chunks",
+        help="Comma-separated chunk indices or ranges to run for debugging, e.g. 12,18-20",
+    )
+    parser.add_argument(
+        "--ignore-objects",
+        type=Path,
+        help="Path to a text or CSV file of object IDs to skip",
+    )
+    parser.add_argument(
+        "--ignore-object",
+        action="append",
+        default=[],
+        help="Object ID to skip. May be supplied multiple times",
+    )
 
     args = parser.parse_args()
     orbit_path = args.orbits
@@ -31,7 +77,21 @@ def main():
         print("Running comet analysis")
     else:
         print("Running asteroid analysis")
-    run_ponder(args.db, orbit_path, args.config, comet=args.comet)
+    run_ponder(
+        args.db,
+        orbit_path,
+        args.config,
+        comet=args.comet,
+        filter_orbits=not args.no_filter_orbits,
+        chunk_size=args.chunk_size,
+        sorcha_workers=args.sorcha_workers,
+        sorcha_timeout=args.sorcha_timeout,
+        resume_chunks=not args.no_resume_chunks,
+        only_chunks=args.only_chunks,
+        ignore_objects_path=args.ignore_objects,
+        ignore_object_ids=args.ignore_object,
+        debug_failed_chunk_size=args.debug_failed_chunk_size,
+    )
 
 
 if __name__ == "__main__":
