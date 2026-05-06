@@ -372,7 +372,16 @@ def plan_debug_subchunks(parent_chunk, subchunk_size):
 
 
 def chunk_is_complete(chunk):
-    return chunk.done_path.exists() and chunk.output_path.exists() and chunk.ew_output_path.exists()
+    if not chunk.done_path.exists():
+        return False
+
+    marker = _read_json_file(chunk.done_path)
+    output_expected = marker.get("output_exists", True)
+    ew_output_expected = marker.get("ew_output_exists", True)
+    return (
+        (not output_expected or chunk.output_path.exists())
+        and (not ew_output_expected or chunk.ew_output_path.exists())
+    )
 
 
 def write_chunk_inputs(chunk, orbs, phys):
@@ -434,6 +443,8 @@ def chunk_run_metadata(
         "orbits_path": str(chunk.orbits_path),
         "physparams_path": str(chunk.physparams_path),
         "output_path": str(chunk.output_path),
+        "output_exists": chunk.output_path.exists(),
+        "ew_output_exists": chunk.ew_output_path.exists(),
     }
 
 
@@ -1092,6 +1103,8 @@ def combine_csv_files(input_paths, output_path):
     with open(output_path, "w") as out:
         wrote_header = False
         for input_path in input_paths:
+            if not input_path.exists():
+                continue
             with open(input_path) as src:
                 header = src.readline()
                 if not header:

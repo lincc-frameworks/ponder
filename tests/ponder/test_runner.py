@@ -54,6 +54,21 @@ def test_chunk_is_complete_requires_marker_and_outputs(tmp_path):
     assert runner.chunk_is_complete(chunk)
 
 
+def test_chunk_is_complete_allows_marked_zero_output_success(tmp_path):
+    chunk = runner.SorchaChunk(
+        index=0,
+        row_start=0,
+        row_end=1,
+        orbits_path=tmp_path / "chunk_orbits.csv",
+        physparams_path=tmp_path / "chunk_physparams.csv",
+        output_path=tmp_path / "chunk.csv",
+    )
+
+    chunk.done_path.write_text(json.dumps({"output_exists": False, "ew_output_exists": False}))
+
+    assert runner.chunk_is_complete(chunk)
+
+
 def test_combine_csv_files_keeps_one_header(tmp_path):
     first = tmp_path / "first.csv"
     second = tmp_path / "second.csv"
@@ -64,6 +79,17 @@ def test_combine_csv_files_keeps_one_header(tmp_path):
     runner.combine_csv_files([first, second], output)
 
     assert output.read_text() == "ObjID,value\nA,1\nB,2\n"
+
+
+def test_combine_csv_files_skips_missing_inputs(tmp_path):
+    first = tmp_path / "first.csv"
+    missing = tmp_path / "missing.csv"
+    output = tmp_path / "combined.csv"
+    first.write_text("ObjID,value\nA,1\n")
+
+    runner.combine_csv_files([first, missing], output)
+
+    assert output.read_text() == "ObjID,value\nA,1\n"
 
 
 def test_mpc_catalog_snapshot_gzips_source_and_preserves_row_numbers(tmp_path):
@@ -429,6 +455,61 @@ def test_rerun_resumes_parent_failures_into_debug_salvage(tmp_path, monkeypatch)
     assert any("debug" in name for name in second_run_calls)
     output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
     assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B", "C"]
+
+
+def test_salvage_skips_successful_debug_ranges_without_outputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(runner, "RESULTS_DIR", tmp_path / "results")
+
+    def fake_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        input_rows = pd.read_csv(orbits)
+        obj_ids = input_rows["ObjID"].tolist()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if "D" in obj_ids:
+            raise TimeoutError("bad row")
+        if obj_ids == ["C"]:
+            return
+
+        output.write_text("ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in obj_ids))
+        output.with_name(f"{output.stem}_ew.csv").write_text(
+            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in obj_ids)
+        )
+
+    monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
+    orbs = pd.DataFrame({"ObjID": ["A", "B", "C", "D"]})
+    phys = pd.DataFrame({"ObjID": ["A", "B", "C", "D"]})
+    catalog_rows = pd.DataFrame({"Principal_desig": ["A", "B", "C", "D"]})
+
+    completed = runner.run_sorcha_chunks(
+        orbs,
+        phys,
+        "unchanged_and_new",
+        "2026-05-05T01:02:03Z",
+        db="pointings.db",
+        config="config.ini",
+        chunk_size=2,
+        workers=1,
+        catalog_rows=catalog_rows,
+        debug_failed_chunk_size=1,
+    )
+
+    assert completed is True
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
+    assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B"]
+
+    debug_dir = next((tmp_path / "results").glob("*/debug"))
+    zero_output_done = debug_dir / "chunk_00001_debug_0000_rows_0000002_0000002.done"
+    assert json.loads(zero_output_done.read_text())["output_exists"] is False
+    assert runner.chunk_is_complete(
+        runner.SorchaChunk(
+            index=0,
+            row_start=2,
+            row_end=3,
+            orbits_path=tmp_path / "unused_orbits.csv",
+            physparams_path=tmp_path / "unused_phys.csv",
+            output_path=debug_dir / "chunk_00001_debug_0000_rows_0000002_0000002.csv",
+        )
+    )
 
 
 def test_force_debug_chunking_bypasses_parent_chunks(tmp_path, monkeypatch):

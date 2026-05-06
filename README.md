@@ -111,6 +111,10 @@ Debug subchunks get their own progress bar and write:
 - `results/<date>_job_<job>_<digest>/debug/subchunk_debug_report.csv`
 - `results/<date>_job_<job>_<digest>/debug/failed_subchunk_catalog_rows.csv`
 
+If Sorcha completes a debug or isolation range but emits no output CSV because
+there are no rows to write, Ponder treats that as a successful zero-output range
+and skips the missing file during final combine.
+
 By default, Ponder keeps subdividing failed debug ranges until it identifies
 individual failing rows. If you already know which parent chunks failed, add
 `--force-debug-chunking` with `--only-chunks` to skip the 5000-row parent timeout
