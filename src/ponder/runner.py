@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import json
 import os
@@ -21,6 +22,27 @@ WORK_DIR = Path("work")
 RESULTS_DIR = Path("results")
 DEFAULT_CHUNK_SIZE = 5000
 DEFAULT_SORCHA_WORKERS = 1
+CATALOG_ROW_COLUMN = "ponder_catalog_row"
+OUTPUT_ID_COLUMNS = [
+    "ObjID",
+    "objectId",
+    "objectID",
+    "ssObjectId",
+    "ssObjectID",
+    "Principal_desig",
+    "Provisional_packed_desig",
+    "Designation_and_name",
+]
+OUTPUT_TIMESTAMP_COLUMNS = [
+    "fieldMJD_TAI",
+    "midPointTai",
+    "observationStartMJD_TAI",
+    "observationStartMJD",
+    "observationMidpointMJD_TAI",
+    "MJD_TDB",
+    "MJD",
+    "fieldJD_TDB",
+]
 
 
 def first_run_setup(objects, state, db_path):
@@ -209,6 +231,56 @@ def filter_ignored_objects(objects, ignore_ids):
     kept = [obj for obj in objects if obj_id(obj) not in ignore_ids]
     print(f"  Ignore list — kept: {len(kept)}  removed: {len(objects) - len(kept)}")
     return kept
+
+
+def read_json_catalog(path):
+    path = Path(path)
+    if path.suffix.lower() == ".gz":
+        with gzip.open(path, "rt") as file:
+            return json.load(file)
+    return json.loads(path.read_text())
+
+
+def annotate_catalog_row_numbers(objects):
+    for row_number, obj in enumerate(objects):
+        if isinstance(obj, dict):
+            obj[CATALOG_ROW_COLUMN] = row_number
+    return objects
+
+
+def _catalog_snapshot_stem(path):
+    name = Path(path).name
+    for suffix in [".gz", ".json"]:
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+    safe = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in name)
+    return safe or "mpc_catalog"
+
+
+def write_mpc_catalog_snapshot(object_path, results_dir, timestamp):
+    object_path = Path(object_path)
+    snapshot_dir = Path(results_dir) / "catalogs"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_prefix = timestamp[:10]
+    stem = _catalog_snapshot_stem(object_path)
+    tmp_path = snapshot_dir / f".{timestamp_prefix}_{stem}.json.gz.tmp"
+
+    digest = hashlib.sha256()
+    source_open = gzip.open if object_path.suffix.lower() == ".gz" else open
+    with source_open(object_path, "rb") as src, gzip.GzipFile(
+        filename=str(tmp_path), mode="wb", mtime=0
+    ) as dst:
+        for block in iter(lambda: src.read(1024 * 1024), b""):
+            digest.update(block)
+            dst.write(block)
+
+    snapshot_path = snapshot_dir / f"{timestamp_prefix}_{stem}_{digest.hexdigest()[:12]}.json.gz"
+    if snapshot_path.exists():
+        tmp_path.unlink()
+    else:
+        tmp_path.replace(snapshot_path)
+
+    return snapshot_path
 
 
 def dataframe_digest(*frames):
@@ -422,13 +494,22 @@ def forced_chunk_failure(chunk, worker_count, reason="Forced debug chunking"):
     return ChunkRunResult(chunk=chunk, ok=False, error=reason, metadata=metadata)
 
 
-def write_chunk_manifest(manifest_path, chunks, job_name, row_count, chunk_size, digest):
+def write_chunk_manifest(
+    manifest_path,
+    chunks,
+    job_name,
+    row_count,
+    chunk_size,
+    digest,
+    catalog_snapshot_path=None,
+):
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
         "job_name": job_name,
         "row_count": row_count,
         "chunk_size": chunk_size,
         "digest": digest,
+        "catalog_snapshot_path": "" if catalog_snapshot_path is None else str(catalog_snapshot_path),
         "chunks": [
             {
                 "index": chunk.index,
@@ -546,6 +627,7 @@ def isolation_report_paths(debug_dir):
         debug_dir / "isolation_report.csv",
         debug_dir / "failing_rows.csv",
         debug_dir / "group_failures.csv",
+        debug_dir / "group_failure_catalog_rows.csv",
         debug_dir / "debug_timing_summary.csv",
     )
 
@@ -605,61 +687,66 @@ def write_timing_summary(results, timing_path, wall_time_seconds=0.0):
     return timing_path
 
 
-def catalog_rows_for_results(results, catalog_rows, metadata_prefix):
+def catalog_rows_for_results(results, catalog_rows, metadata_prefix, extra_metadata=None):
+    extra_metadata = extra_metadata or {}
     rows = []
+    metadata_keys = [
+        "parent_chunk",
+        "node_id",
+        "parent_node_id",
+        "debug_level",
+        "row_start",
+        "row_end",
+        "row_count",
+        "status",
+        "error",
+        "duration_seconds",
+        "sorcha_seconds",
+        "resumed",
+        *extra_metadata.keys(),
+    ]
     for result in results:
         chunk = result.chunk
         chunk_rows = catalog_rows.iloc[chunk.row_start : chunk.row_end].copy()
-        for key in reversed(
-            [
-                "parent_chunk",
-                "node_id",
-                "parent_node_id",
-                "debug_level",
-                "row_start",
-                "row_end",
-                "row_count",
-                "status",
-                "error",
-                "duration_seconds",
-                "sorcha_seconds",
-                "resumed",
-            ]
-        ):
-            chunk_rows.insert(0, f"{metadata_prefix}_{key}", result.metadata.get(key, ""))
+        chunk_rows.insert(0, f"{metadata_prefix}_input_row", range(chunk.row_start, chunk.row_end))
+        for key in reversed(metadata_keys):
+            if key in extra_metadata:
+                value = extra_metadata[key]
+                if callable(value):
+                    value = value(result)
+            else:
+                value = result.metadata.get(key, "")
+            chunk_rows.insert(0, f"{metadata_prefix}_{key}", value)
         rows.append(chunk_rows)
 
     if rows:
         return pd.concat(rows, ignore_index=True)
 
-    metadata_columns = [
-        f"{metadata_prefix}_{key}"
-        for key in [
-            "parent_chunk",
-            "node_id",
-            "parent_node_id",
-            "debug_level",
-            "row_start",
-            "row_end",
-            "row_count",
-            "status",
-            "error",
-            "duration_seconds",
-            "sorcha_seconds",
-            "resumed",
-        ]
-    ]
+    metadata_columns = [f"{metadata_prefix}_{key}" for key in metadata_keys]
+    metadata_columns.append(f"{metadata_prefix}_input_row")
     return pd.DataFrame(columns=metadata_columns + list(catalog_rows.columns))
 
 
 def write_isolation_reports(
     debug_dir, results, failing_rows, group_failures, catalog_rows, wall_time_seconds
 ):
-    report_path, failing_rows_path, group_failures_path, timing_path = isolation_report_paths(debug_dir)
+    (
+        report_path,
+        failing_rows_path,
+        group_failures_path,
+        group_failure_catalog_path,
+        timing_path,
+    ) = isolation_report_paths(debug_dir)
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
     pd.DataFrame([result.metadata for result in sort_chunk_results(results)]).to_csv(report_path, index=False)
     catalog_rows_for_results(failing_rows, catalog_rows, "failure").to_csv(failing_rows_path, index=False)
+    catalog_rows_for_results(
+        group_failures,
+        catalog_rows,
+        "group_failure",
+        extra_metadata={"failure_type": "group_failed_children_passed"},
+    ).to_csv(group_failure_catalog_path, index=False)
 
     group_rows = []
     for result in group_failures:
@@ -672,7 +759,7 @@ def write_isolation_reports(
     pd.DataFrame(group_rows, columns=group_columns).to_csv(group_failures_path, index=False)
     write_timing_summary(results, timing_path, wall_time_seconds=wall_time_seconds)
 
-    return report_path, failing_rows_path, group_failures_path, timing_path
+    return report_path, failing_rows_path, group_failures_path, group_failure_catalog_path, timing_path
 
 
 def run_sorcha_chunk(chunk, db, config, timeout, input_write_seconds=0.0, worker_count=1):
@@ -975,7 +1062,13 @@ def run_failing_row_isolation(
 
         level += 1
 
-    report_path, failing_rows_path, group_failures_path, timing_path = write_isolation_reports(
+    (
+        report_path,
+        failing_rows_path,
+        group_failures_path,
+        group_failure_catalog_path,
+        timing_path,
+    ) = write_isolation_reports(
         debug_dir,
         sort_chunk_results(all_results),
         sort_chunk_results(failing_rows),
@@ -986,6 +1079,7 @@ def run_failing_row_isolation(
     print(f"  Wrote isolation report to {report_path}")
     print(f"  Wrote failing rows to {failing_rows_path}")
     print(f"  Wrote group failures to {group_failures_path}")
+    print(f"  Wrote group failure catalog rows to {group_failure_catalog_path}")
     print(f"  Wrote debug timing summary to {timing_path}")
 
     return all_results
@@ -1015,6 +1109,185 @@ def combine_chunk_outputs(chunks, final_output):
     )
 
 
+def _first_present(columns, candidates):
+    exact = set(columns)
+    lowered = {column.lower(): column for column in columns}
+    for candidate in candidates:
+        if candidate in exact:
+            return candidate
+        if candidate.lower() in lowered:
+            return lowered[candidate.lower()]
+    return None
+
+
+def _csv_columns(path):
+    try:
+        return list(pd.read_csv(path, nrows=0).columns)
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return []
+
+
+def output_pair_key_columns(paths):
+    for path in paths:
+        columns = _csv_columns(path)
+        id_column = _first_present(columns, OUTPUT_ID_COLUMNS)
+        if not id_column:
+            continue
+        timestamp_column = _first_present(columns, OUTPUT_TIMESTAMP_COLUMNS)
+        key_columns = [id_column]
+        if timestamp_column:
+            key_columns.append(timestamp_column)
+        return key_columns, id_column, timestamp_column or ""
+
+    return [], "", ""
+
+
+def read_output_key_counts(paths, key_columns):
+    if not key_columns:
+        return pd.DataFrame(columns=["row_count"]), 0
+
+    frames = []
+    row_count = 0
+    for path in paths:
+        try:
+            frame = pd.read_csv(path, dtype=str, usecols=key_columns)
+        except (FileNotFoundError, pd.errors.EmptyDataError, ValueError):
+            continue
+        row_count += len(frame)
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(columns=key_columns + ["row_count"]), row_count
+
+    keys = pd.concat(frames, ignore_index=True)
+    counts = keys.groupby(key_columns, dropna=False).size().reset_index(name="row_count")
+    return counts, row_count
+
+
+def catalog_row_lookup(catalog_rows):
+    if CATALOG_ROW_COLUMN not in catalog_rows.columns:
+        return pd.DataFrame(columns=["object_id", CATALOG_ROW_COLUMN])
+
+    lookup_frames = []
+    for column in OUTPUT_ID_COLUMNS:
+        if column not in catalog_rows.columns:
+            continue
+        lookup = catalog_rows[[column, CATALOG_ROW_COLUMN]].dropna(subset=[column]).copy()
+        lookup.rename(columns={column: "object_id"}, inplace=True)
+        lookup_frames.append(lookup)
+
+    if not lookup_frames:
+        return pd.DataFrame(columns=["object_id", CATALOG_ROW_COLUMN])
+
+    lookup = pd.concat(lookup_frames, ignore_index=True)
+    lookup["object_id"] = lookup["object_id"].astype(str)
+    return lookup.drop_duplicates(subset=["object_id"], keep="first")
+
+
+def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
+    paths_for_columns = list(source_paths) + [combined_path]
+    key_columns, id_column, timestamp_column = output_pair_key_columns(paths_for_columns)
+    summary = {
+        "output_name": output_name,
+        "combined_path": str(combined_path),
+        "source_file_count": len(source_paths),
+        "id_column": id_column,
+        "timestamp_column": timestamp_column,
+        "key_columns": ",".join(key_columns),
+        "source_rows": 0,
+        "combined_rows": 0,
+        "source_pairs": 0,
+        "combined_pairs": 0,
+        "missing_pairs": 0,
+        "missing_rows": 0,
+        "status": "skipped_no_key_columns",
+    }
+
+    if not key_columns:
+        return summary, pd.DataFrame()
+
+    source_counts, source_rows = read_output_key_counts(source_paths, key_columns)
+    combined_counts, combined_rows = read_output_key_counts([combined_path], key_columns)
+    summary["source_rows"] = source_rows
+    summary["combined_rows"] = combined_rows
+    summary["source_pairs"] = len(source_counts)
+    summary["combined_pairs"] = len(combined_counts)
+    summary["status"] = "ok"
+
+    if source_counts.empty:
+        return summary, pd.DataFrame()
+
+    source_counts.rename(columns={"row_count": "source_count"}, inplace=True)
+    combined_counts.rename(columns={"row_count": "combined_count"}, inplace=True)
+    merged = source_counts.merge(combined_counts, on=key_columns, how="left")
+    merged["combined_count"] = merged["combined_count"].fillna(0).astype(int)
+    missing = merged[merged["source_count"] > merged["combined_count"]].copy()
+    if missing.empty:
+        return summary, missing
+
+    missing["missing_count"] = missing["source_count"] - missing["combined_count"]
+    missing.insert(0, "output_name", output_name)
+    missing.insert(1, "object_id", missing[id_column].astype(str))
+    missing.insert(2, "timestamp", missing[timestamp_column].astype(str) if timestamp_column else "")
+    missing.insert(3, "id_column", id_column)
+    missing.insert(4, "timestamp_column", timestamp_column)
+
+    lookup = catalog_row_lookup(catalog_rows)
+    if not lookup.empty:
+        missing = missing.merge(lookup, on="object_id", how="left")
+
+    summary["missing_pairs"] = len(missing)
+    summary["missing_rows"] = int(missing["missing_count"].sum())
+    summary["status"] = "missing"
+    return summary, missing
+
+
+def audit_combined_outputs(chunks, final_output, catalog_rows):
+    results_dir = chunks[0].output_path.parent
+    audit_path = results_dir / "output_audit.csv"
+    missing_path = results_dir / "missing_output_pairs.csv"
+
+    audit_rows = []
+    missing_frames = []
+    output_sets = [
+        ("detections", [chunk.output_path for chunk in chunks], final_output),
+        (
+            "ephemeris",
+            [chunk.ew_output_path for chunk in chunks],
+            final_output.with_name(f"{final_output.stem}_ew.csv"),
+        ),
+    ]
+    for output_name, source_paths, combined_path in output_sets:
+        summary, missing = audit_output_pairs(source_paths, combined_path, output_name, catalog_rows)
+        audit_rows.append(summary)
+        if not missing.empty:
+            missing_frames.append(missing)
+
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(audit_rows).to_csv(audit_path, index=False)
+
+    if missing_frames:
+        missing_report = pd.concat(missing_frames, ignore_index=True)
+    else:
+        missing_report = pd.DataFrame(
+            columns=[
+                "output_name",
+                "object_id",
+                "timestamp",
+                "id_column",
+                "timestamp_column",
+                "source_count",
+                "combined_count",
+                "missing_count",
+                CATALOG_ROW_COLUMN,
+            ]
+        )
+    missing_report.to_csv(missing_path, index=False)
+
+    missing_rows = sum(row["missing_rows"] for row in audit_rows)
+    return audit_path, missing_path, missing_rows
+
+
 def run_sorcha_chunks(
     orbs,
     phys,
@@ -1028,6 +1301,7 @@ def run_sorcha_chunks(
     resume=True,
     only_chunks=None,
     catalog_rows=None,
+    catalog_snapshot_path=None,
     debug_failed_chunk_size=0,
     force_debug_chunking=False,
     isolate_failing_rows=False,
@@ -1068,7 +1342,25 @@ def run_sorcha_chunks(
         chunks_to_run = chunks
 
     manifest_path = chunks[0].orbits_path.parent / "manifest.json"
-    write_chunk_manifest(manifest_path, chunks, job_name, len(orbs), chunk_size, digest)
+    results_manifest_path = chunks[0].output_path.parent / "manifest.json"
+    write_chunk_manifest(
+        manifest_path,
+        chunks,
+        job_name,
+        len(orbs),
+        chunk_size,
+        digest,
+        catalog_snapshot_path=catalog_snapshot_path,
+    )
+    write_chunk_manifest(
+        results_manifest_path,
+        chunks,
+        job_name,
+        len(orbs),
+        chunk_size,
+        digest,
+        catalog_snapshot_path=catalog_snapshot_path,
+    )
 
     if force_debug_chunking:
         print(
@@ -1173,6 +1465,12 @@ def run_sorcha_chunks(
 
     combine_chunk_outputs(chunks, final_output)
     print(f"  Combined {len(chunks)} chunks into {final_output}")
+    audit_path, missing_path, missing_rows = audit_combined_outputs(chunks, final_output, catalog_rows)
+    print(f"  Wrote output audit to {audit_path}")
+    if missing_rows:
+        print(f"  Output audit — missing {missing_rows} chunk output rows; details in {missing_path}")
+    else:
+        print(f"  Output audit — all chunk object/timestamp pairs are present in combined outputs")
     return True
 
 
@@ -1189,6 +1487,7 @@ def run_id_set(
     timeout=None,
     resume=True,
     only_chunks=None,
+    catalog_snapshot_path=None,
     debug_failed_chunk_size=0,
     force_debug_chunking=False,
     isolate_failing_rows=False,
@@ -1211,6 +1510,7 @@ def run_id_set(
         resume=resume,
         only_chunks=only_chunks,
         catalog_rows=catalog_rows,
+        catalog_snapshot_path=catalog_snapshot_path,
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
@@ -1250,11 +1550,15 @@ def run_ponder(
     WORK_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
 
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    catalog_snapshot_path = write_mpc_catalog_snapshot(object_path, RESULTS_DIR, ts)
+    print(f"  Saved MPC catalog snapshot to {catalog_snapshot_path}")
+
     # load persisted state
     state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {"last_mjd": 0.0}
     prev_hashes = json.loads(HASHES_FILE.read_text()) if HASHES_FILE.exists() else {}
 
-    objects = json.loads(object_path.read_text())
+    objects = annotate_catalog_row_numbers(read_json_catalog(object_path))
     ignore_ids = read_ignore_ids(ignore_objects_path, ignore_object_ids)
     objects = filter_ignored_objects(objects, ignore_ids)
     if filter_orbits:
@@ -1265,7 +1569,6 @@ def run_ponder(
     if not prev_hashes:
         first_run_setup(objects, state, db_path)
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"\n[{ts}] Starting cycle")
 
     # -- load and diff inputs --
@@ -1294,6 +1597,7 @@ def run_ponder(
         timeout=sorcha_timeout,
         resume=resume_chunks,
         only_chunks=selected_chunks,
+        catalog_snapshot_path=catalog_snapshot_path,
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
@@ -1312,6 +1616,7 @@ def run_ponder(
         timeout=sorcha_timeout,
         resume=resume_chunks,
         only_chunks=selected_chunks,
+        catalog_snapshot_path=catalog_snapshot_path,
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,

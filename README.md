@@ -40,6 +40,11 @@ progress bar for the current batch set, including the number of workers, and it
 combines all completed chunks into the usual output CSVs when the full job
 finishes.
 
+Each run also stores the input MPC catalog as a gzipped JSON snapshot under
+`results/catalogs/` and records that path in each job manifest. Ponder adds a
+`ponder_catalog_row` column to catalog-row reports so row-number references can
+be traced back to the saved snapshot.
+
 Useful chunking options:
 
 ```bash
@@ -59,6 +64,16 @@ catalog rows under the chunk result directory:
 
 - `results/<date>_job_<job>_<digest>/failures.csv`
 - `results/<date>_job_<job>_<digest>/failed_catalog_rows.csv`
+
+When chunks finish and are combined, Ponder audits the per-chunk Sorcha outputs
+against the combined result files by object ID and timestamp, then writes:
+
+- `results/<date>_job_<job>_<digest>/output_audit.csv`
+- `results/<date>_job_<job>_<digest>/missing_output_pairs.csv`
+
+If any chunk output object/timestamp pairs are absent from the combined
+detection or ephemeris files, `missing_output_pairs.csv` lists the object,
+timestamp, missing count, and `ponder_catalog_row`.
 
 The failed catalog CSV keeps the original JSON columns and adds chunk metadata,
 so it can be inspected directly or reused as an ignore list. To skip known bad
@@ -107,8 +122,10 @@ Recursive isolation writes additive reports in the debug directory:
 - `isolation_report.csv` lists every tested range and whether it ran, resumed,
   completed, or failed.
 - `failing_rows.csv` contains only size-1 ranges that still fail, with the
-  original catalog columns.
+  original catalog columns and absolute input row.
 - `group_failures.csv` lists failed ranges whose smaller child ranges passed.
+- `group_failure_catalog_rows.csv` lists the original catalog rows covered by
+  those group-only failures.
 - `debug_timing_summary.csv` summarizes timing by debug level and row count.
 
 ## Dev Guide - Getting Started

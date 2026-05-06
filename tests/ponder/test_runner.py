@@ -1,3 +1,6 @@
+import gzip
+import json
+
 import pandas as pd
 import pytest
 
@@ -61,6 +64,70 @@ def test_combine_csv_files_keeps_one_header(tmp_path):
     runner.combine_csv_files([first, second], output)
 
     assert output.read_text() == "ObjID,value\nA,1\nB,2\n"
+
+
+def test_mpc_catalog_snapshot_gzips_source_and_preserves_row_numbers(tmp_path):
+    catalog_path = tmp_path / "mpc.json"
+    objects = [{"Principal_desig": "A"}, {"Principal_desig": "B"}]
+    catalog_path.write_text(json.dumps(objects))
+
+    snapshot_path = runner.write_mpc_catalog_snapshot(
+        catalog_path,
+        tmp_path / "results",
+        "2026-05-05T01:02:03Z",
+    )
+
+    assert snapshot_path.parent == tmp_path / "results" / "catalogs"
+    assert snapshot_path.name.startswith("2026-05-05_mpc_")
+    with gzip.open(snapshot_path, "rt") as file:
+        assert json.load(file) == objects
+
+    loaded = runner.annotate_catalog_row_numbers(runner.read_json_catalog(snapshot_path))
+    assert [obj[runner.CATALOG_ROW_COLUMN] for obj in loaded] == [0, 1]
+
+
+def test_audit_combined_outputs_reports_missing_object_timestamps(tmp_path):
+    chunk = runner.SorchaChunk(
+        index=0,
+        row_start=0,
+        row_end=2,
+        orbits_path=tmp_path / "work" / "chunk_orbits.csv",
+        physparams_path=tmp_path / "work" / "chunk_physparams.csv",
+        output_path=tmp_path / "results" / "job" / "chunk.csv",
+    )
+    chunk.output_path.parent.mkdir(parents=True)
+    chunk.output_path.write_text("ObjID,fieldMJD_TAI,value\nA,1,x\nB,2,y\nB,2,z\n")
+    chunk.ew_output_path.write_text("ObjID,fieldMJD_TAI\nA,1\nB,2\n")
+
+    final_output = tmp_path / "results" / "2026-05-05_job_test.csv"
+    final_output.write_text("ObjID,fieldMJD_TAI,value\nA,1,x\nB,2,y\n")
+    final_output.with_name(f"{final_output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nA,1\nB,2\n")
+    catalog_rows = pd.DataFrame(
+        {
+            "Principal_desig": ["A", "B"],
+            runner.CATALOG_ROW_COLUMN: [10, 11],
+        }
+    )
+
+    audit_path, missing_path, missing_rows = runner.audit_combined_outputs(
+        [chunk],
+        final_output,
+        catalog_rows,
+    )
+
+    assert missing_rows == 1
+    summary = pd.read_csv(audit_path)
+    assert summary["status"].tolist() == ["missing", "ok"]
+    assert summary["missing_rows"].tolist() == [1, 0]
+
+    missing = pd.read_csv(missing_path)
+    assert missing["output_name"].tolist() == ["detections"]
+    assert missing["object_id"].tolist() == ["B"]
+    assert missing["timestamp"].astype(str).tolist() == ["2"]
+    assert missing["source_count"].tolist() == [2]
+    assert missing["combined_count"].tolist() == [1]
+    assert missing["missing_count"].tolist() == [1]
+    assert missing[runner.CATALOG_ROW_COLUMN].tolist() == [11]
 
 
 def test_run_sorcha_chunks_resumes_completed_chunks(tmp_path, monkeypatch):
@@ -344,6 +411,7 @@ def test_isolate_failing_rows_finds_single_bad_row(tmp_path, monkeypatch):
 
     assert isolation["debug_level"].tolist() == [1, 1, 2, 2]
     assert failing_rows["Principal_desig"].tolist() == ["C"]
+    assert failing_rows["failure_input_row"].tolist() == [2]
     assert failing_rows["failure_row_count"].tolist() == [1]
     for column in ["started_at", "completed_at", "duration_seconds", "sorcha_seconds", "resumed"]:
         assert column in isolation.columns
@@ -490,9 +558,16 @@ def test_isolate_failing_rows_reports_group_only_failures(tmp_path, monkeypatch)
 
     debug_dir = next((tmp_path / "results").glob("*/debug"))
     group_failures = pd.read_csv(debug_dir / "group_failures.csv")
+    group_catalog_rows = pd.read_csv(debug_dir / "group_failure_catalog_rows.csv")
     failing_rows = pd.read_csv(debug_dir / "failing_rows.csv")
 
     assert group_failures["failure_type"].tolist() == ["group_failed_children_passed"]
     assert group_failures["row_start"].tolist() == [2]
     assert group_failures["row_end"].tolist() == [4]
+    assert group_catalog_rows["group_failure_failure_type"].tolist() == [
+        "group_failed_children_passed",
+        "group_failed_children_passed",
+    ]
+    assert group_catalog_rows["group_failure_input_row"].tolist() == [2, 3]
+    assert group_catalog_rows["Principal_desig"].tolist() == ["C", "D"]
     assert failing_rows.empty
