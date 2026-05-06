@@ -2,7 +2,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .runner import run_ponder
+from .runner import DEFAULT_DEBUG_FAILED_CHUNK_SIZE, DEFAULT_ISOLATE_FAILING_ROWS, run_ponder
 from .utils import get_current_orbits
 
 
@@ -41,8 +41,11 @@ def main():
     parser.add_argument(
         "--debug-failed-chunk-size",
         type=int,
-        default=0,
-        help="If a Sorcha chunk fails, split it into this many rows per debug subchunk",
+        default=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
+        help=(
+            "If a Sorcha chunk fails, split it into this many rows per debug subchunk "
+            f"(default: {DEFAULT_DEBUG_FAILED_CHUNK_SIZE})"
+        ),
     )
     parser.add_argument(
         "--force-debug-chunking",
@@ -51,8 +54,16 @@ def main():
     )
     parser.add_argument(
         "--isolate-failing-rows",
+        dest="isolate_failing_rows",
         action="store_true",
-        help="Recursively split failed debug subchunks until failing rows are isolated",
+        default=DEFAULT_ISOLATE_FAILING_ROWS,
+        help="Recursively split failed debug subchunks until failing rows are isolated (default)",
+    )
+    parser.add_argument(
+        "--no-isolate-failing-rows",
+        dest="isolate_failing_rows",
+        action="store_false",
+        help="Do not recursively split failed debug subchunks after the first debug pass",
     )
     parser.add_argument(
         "--no-resume-chunks",

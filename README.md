@@ -38,7 +38,10 @@ The default chunk size is 5000 rows. Completed chunks are marked with `.done`
 files and are skipped on later runs with the same inputs. Ponder shows a tqdm
 progress bar for the current batch set, including the number of workers, and it
 combines all completed chunks into the usual output CSVs when the full job
-finishes.
+finishes. If a chunk fails, Ponder now splits it into 250-row debug chunks by
+default, recursively isolates remaining failures to single catalog rows, and
+combines the successful parent/debug ranges into the final output while leaving
+the skipped rows in the debug reports.
 
 Each run also stores the input MPC catalog as a gzipped JSON snapshot under
 `results/catalogs/` and records that path in each job manifest. Ponder adds a
@@ -55,6 +58,11 @@ ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-
 - `--chunk-size 0` runs one legacy, unchunked Sorcha job.
 - `--sorcha-workers N` runs up to `N` Sorcha chunks in parallel.
 - `--sorcha-timeout SECONDS` applies a per-chunk timeout.
+- `--debug-failed-chunk-size N` changes the automatic failed-chunk debug size
+  from the default 250 rows. Use `0` with `--no-isolate-failing-rows` to disable
+  automatic debug splitting.
+- `--no-isolate-failing-rows` stops after the first failed-chunk debug pass
+  instead of recursively isolating bad rows.
 - `--no-resume-chunks` reruns chunks even when completed markers exist.
 - `--only-chunks 12,18-20` runs selected chunk indices for debugging and skips
   final combine and state updates.
@@ -76,12 +84,13 @@ detection or ephemeris files, `missing_output_pairs.csv` lists the object,
 timestamp, missing count, and `ponder_catalog_row`.
 
 The failed catalog CSV keeps the original JSON columns and adds chunk metadata,
-so it can be inspected directly or reused as an ignore list. To skip known bad
-objects on a later run, pass either a file or repeated object IDs:
+so it can be inspected directly. When recursive isolation identifies specific
+bad rows, prefer `debug/failing_rows.csv` as the narrow ignore list. To skip
+known bad objects on a later run, pass either a file or repeated object IDs:
 
 ```bash
 ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-2026.json --db from_rubin_dp1.db \
-  --ignore-objects results/<date>_job_<job>_<digest>/failed_catalog_rows.csv
+  --ignore-objects results/<date>_job_<job>_<digest>/debug/failing_rows.csv
 ```
 
 ```bash
@@ -89,12 +98,12 @@ ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-
   --ignore-object K23A00A --ignore-object K23A01B
 ```
 
-To narrow a failed 5000-row chunk down to smaller groups during the same run, use
-subchunk debugging:
+Failed 5000-row chunks are automatically narrowed to smaller groups during the
+same run. To use a different first-pass debug size:
 
 ```bash
 ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-2026.json --db from_rubin_dp1.db \
-  --sorcha-timeout 900 --debug-failed-chunk-size 250
+  --sorcha-timeout 900 --debug-failed-chunk-size 100
 ```
 
 Debug subchunks get their own progress bar and write:
@@ -102,10 +111,10 @@ Debug subchunks get their own progress bar and write:
 - `results/<date>_job_<job>_<digest>/debug/subchunk_debug_report.csv`
 - `results/<date>_job_<job>_<digest>/debug/failed_subchunk_catalog_rows.csv`
 
-To keep subdividing failed debug ranges until Ponder identifies individual
-failing rows, add `--isolate-failing-rows`. If you already know which parent
-chunks failed, add `--force-debug-chunking` with `--only-chunks` to skip the
-5000-row parent timeout and go directly to resumable debug ranges:
+By default, Ponder keeps subdividing failed debug ranges until it identifies
+individual failing rows. If you already know which parent chunks failed, add
+`--force-debug-chunking` with `--only-chunks` to skip the 5000-row parent timeout
+and go directly to resumable debug ranges:
 
 ```bash
 ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-2026.json --db from_rubin_dp1.db \
@@ -113,8 +122,7 @@ ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-
   --sorcha-timeout 900 \
   --debug-failed-chunk-size 250 \
   --sorcha-workers 3 \
-  --force-debug-chunking \
-  --isolate-failing-rows
+  --force-debug-chunking
 ```
 
 Recursive isolation writes additive reports in the debug directory:

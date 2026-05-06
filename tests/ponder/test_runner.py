@@ -254,6 +254,8 @@ def test_failed_chunks_write_summary_and_catalog_rows(tmp_path, monkeypatch):
             chunk_size=2,
             workers=1,
             catalog_rows=catalog_rows,
+            debug_failed_chunk_size=0,
+            isolate_failing_rows=False,
         )
 
     failure_paths = list((tmp_path / "results").glob("*/failures.csv"))
@@ -298,6 +300,7 @@ def test_failed_chunks_can_run_debug_subchunks(tmp_path, monkeypatch):
             workers=1,
             catalog_rows=catalog_rows,
             debug_failed_chunk_size=1,
+            isolate_failing_rows=False,
         )
 
     report_paths = list((tmp_path / "results").glob("*/debug/subchunk_debug_report.csv"))
@@ -311,6 +314,121 @@ def test_failed_chunks_can_run_debug_subchunks(tmp_path, monkeypatch):
     assert failed_catalog["parent_chunk"].tolist() == [1]
     assert failed_catalog["subchunk"].tolist() == [1]
     assert failed_catalog["Principal_desig"].tolist() == ["D"]
+
+
+def test_failed_chunks_default_to_isolation_and_salvage_outputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(runner, "RESULTS_DIR", tmp_path / "results")
+
+    def fake_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        input_rows = pd.read_csv(orbits)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if "D" in input_rows["ObjID"].tolist():
+            raise TimeoutError("bad row")
+
+        rows = input_rows["ObjID"].tolist()
+        output.write_text("ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in rows))
+        output.with_name(f"{output.stem}_ew.csv").write_text(
+            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in rows)
+        )
+
+    monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
+    orbs = pd.DataFrame({"ObjID": ["A", "B", "C", "D"]})
+    phys = pd.DataFrame({"ObjID": ["A", "B", "C", "D"]})
+    catalog_rows = pd.DataFrame({"Principal_desig": ["A", "B", "C", "D"]})
+
+    completed = runner.run_sorcha_chunks(
+        orbs,
+        phys,
+        "unchanged_and_new",
+        "2026-05-05T01:02:03Z",
+        db="pointings.db",
+        config="config.ini",
+        chunk_size=2,
+        workers=1,
+        catalog_rows=catalog_rows,
+    )
+
+    assert completed is True
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
+    final_rows = pd.read_csv(output)
+    assert final_rows["ObjID"].tolist() == ["A", "B", "C"]
+
+    debug_dir = next((tmp_path / "results").glob("*/debug"))
+    failing_rows = pd.read_csv(debug_dir / "failing_rows.csv")
+    assert failing_rows["Principal_desig"].tolist() == ["D"]
+    assert failing_rows["failure_row_count"].tolist() == [1]
+
+    audit_path = next((tmp_path / "results").glob("*/output_audit.csv"))
+    audit = pd.read_csv(audit_path)
+    assert audit["status"].tolist() == ["ok", "ok"]
+
+
+def test_rerun_resumes_parent_failures_into_debug_salvage(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(runner, "RESULTS_DIR", tmp_path / "results")
+
+    def first_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        input_rows = pd.read_csv(orbits)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if "D" in input_rows["ObjID"].tolist():
+            raise TimeoutError("bad row")
+        output.write_text("ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"]))
+        output.with_name(f"{output.stem}_ew.csv").write_text(
+            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"])
+        )
+
+    monkeypatch.setattr(runner, "run_sorcha", first_run_sorcha)
+    orbs = pd.DataFrame({"ObjID": ["A", "B", "C", "D"]})
+    phys = pd.DataFrame({"ObjID": ["A", "B", "C", "D"]})
+    catalog_rows = pd.DataFrame({"Principal_desig": ["A", "B", "C", "D"]})
+
+    with pytest.raises(RuntimeError, match="chunk 00001"):
+        runner.run_sorcha_chunks(
+            orbs,
+            phys,
+            "unchanged_and_new",
+            "2026-05-05T01:02:03Z",
+            db="pointings.db",
+            config="config.ini",
+            chunk_size=2,
+            workers=1,
+            catalog_rows=catalog_rows,
+            debug_failed_chunk_size=0,
+            isolate_failing_rows=False,
+        )
+
+    second_run_calls = []
+
+    def second_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        second_run_calls.append(output.name)
+        input_rows = pd.read_csv(orbits)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if "D" in input_rows["ObjID"].tolist():
+            raise TimeoutError("bad row")
+        output.write_text("ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"]))
+        output.with_name(f"{output.stem}_ew.csv").write_text(
+            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"])
+        )
+
+    monkeypatch.setattr(runner, "run_sorcha", second_run_sorcha)
+    completed = runner.run_sorcha_chunks(
+        orbs,
+        phys,
+        "unchanged_and_new",
+        "2026-05-05T01:02:03Z",
+        db="pointings.db",
+        config="config.ini",
+        chunk_size=2,
+        workers=1,
+        catalog_rows=catalog_rows,
+    )
+
+    assert completed is True
+    assert not any(name.startswith("chunk_00001_rows") for name in second_run_calls)
+    assert any("debug" in name for name in second_run_calls)
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
+    assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B", "C"]
 
 
 def test_force_debug_chunking_bypasses_parent_chunks(tmp_path, monkeypatch):
@@ -448,6 +566,7 @@ def test_isolate_failing_rows_resumes_failed_debug_ranges(tmp_path, monkeypatch)
         catalog_rows=catalog_rows,
         debug_failed_chunk_size=2,
         force_debug_chunking=True,
+        isolate_failing_rows=False,
     )
 
     second_run_calls = []

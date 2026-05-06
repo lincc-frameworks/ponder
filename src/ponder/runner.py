@@ -22,6 +22,8 @@ WORK_DIR = Path("work")
 RESULTS_DIR = Path("results")
 DEFAULT_CHUNK_SIZE = 5000
 DEFAULT_SORCHA_WORKERS = 1
+DEFAULT_DEBUG_FAILED_CHUNK_SIZE = 250
+DEFAULT_ISOLATE_FAILING_ROWS = True
 CATALOG_ROW_COLUMN = "ponder_catalog_row"
 OUTPUT_ID_COLUMNS = [
     "ObjID",
@@ -901,7 +903,7 @@ def run_debug_subchunks(
     print(f"  Wrote debug timing summary to {timing_path}")
 
     if isolate_failing_rows:
-        run_failing_row_isolation(
+        return run_failing_row_isolation(
             sort_chunk_results(results),
             orbs,
             phys,
@@ -913,7 +915,7 @@ def run_debug_subchunks(
             resume,
         )
 
-    return results
+    return sort_chunk_results(results)
 
 
 def split_isolation_chunk(chunk, level, start_index):
@@ -1109,6 +1111,69 @@ def combine_chunk_outputs(chunks, final_output):
     )
 
 
+def sort_output_chunks(chunks):
+    return sorted(
+        chunks,
+        key=lambda chunk: (
+            chunk.row_start,
+            chunk.row_end,
+            chunk.debug_level if chunk.debug_level is not None else -1,
+            chunk.index,
+        ),
+    )
+
+
+def _debug_result_parent_node_ids(results):
+    return {
+        result.metadata.get("parent_node_id")
+        for result in results
+        if result.metadata.get("parent_node_id")
+    }
+
+
+def successful_leaf_chunks(results):
+    parent_node_ids = _debug_result_parent_node_ids(results)
+    return [
+        result.chunk
+        for result in sort_chunk_results(results)
+        if result.ok and result.metadata.get("node_id") not in parent_node_ids
+    ]
+
+
+def unresolved_failed_leaf_results(results):
+    parent_node_ids = _debug_result_parent_node_ids(results)
+    unresolved = []
+    for result in sort_chunk_results(results):
+        if result.ok:
+            continue
+        if result.metadata.get("node_id") in parent_node_ids:
+            continue
+        if result.chunk.row_end - result.chunk.row_start > 1:
+            unresolved.append(result)
+    return unresolved
+
+
+def isolated_failed_row_results(results):
+    parent_node_ids = _debug_result_parent_node_ids(results)
+    return [
+        result
+        for result in sort_chunk_results(results)
+        if not result.ok
+        and result.metadata.get("node_id") not in parent_node_ids
+        and result.chunk.row_end - result.chunk.row_start == 1
+    ]
+
+
+def salvage_output_chunks(chunks, failures, debug_results):
+    failed_chunks = {result.chunk for result in failures}
+    completed_parent_chunks = [
+        chunk
+        for chunk in chunks
+        if chunk not in failed_chunks and chunk_is_complete(chunk)
+    ]
+    return sort_output_chunks(completed_parent_chunks + successful_leaf_chunks(debug_results))
+
+
 def _first_present(columns, candidates):
     exact = set(columns)
     lowered = {column.lower(): column for column in columns}
@@ -1242,8 +1307,11 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
     return summary, missing
 
 
-def audit_combined_outputs(chunks, final_output, catalog_rows):
-    results_dir = chunks[0].output_path.parent
+def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None):
+    if results_dir is None:
+        results_dir = chunks[0].output_path.parent
+    else:
+        results_dir = Path(results_dir)
     audit_path = results_dir / "output_audit.csv"
     missing_path = results_dir / "missing_output_pairs.csv"
 
@@ -1302,9 +1370,9 @@ def run_sorcha_chunks(
     only_chunks=None,
     catalog_rows=None,
     catalog_snapshot_path=None,
-    debug_failed_chunk_size=0,
+    debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
-    isolate_failing_rows=False,
+    isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
 ):
     workers = max(1, workers)
     if len(orbs) != len(phys):
@@ -1385,7 +1453,16 @@ def run_sorcha_chunks(
         return False
 
     completed = [chunk for chunk in chunks_to_run if resume and chunk_is_complete(chunk)]
-    pending = [chunk for chunk in chunks_to_run if chunk not in completed]
+    resumed_failures = [
+        chunk
+        for chunk in chunks_to_run
+        if resume and chunk not in completed and chunk.failed_path.exists()
+    ]
+    pending = [
+        chunk
+        for chunk in chunks_to_run
+        if chunk not in completed and chunk not in resumed_failures
+    ]
     final_output = RESULTS_DIR / f"{time[:10]}_job_{job_name}.csv"
     selected_text = ""
     if only_chunks is not None:
@@ -1393,13 +1470,14 @@ def run_sorcha_chunks(
 
     print(
         f"  Sorcha chunks — {job_name}: {len(chunks)} total, "
-        f"{len(completed)} complete, {len(pending)} pending{selected_text}, workers={workers}"
+        f"{len(completed)} complete, {len(resumed_failures)} failed, "
+        f"{len(pending)} pending{selected_text}, workers={workers}"
     )
 
-    failures = []
+    failures = [result_from_failed_chunk(chunk, workers) for chunk in resumed_failures]
     with tqdm(
         total=len(chunks_to_run),
-        initial=len(completed),
+        initial=len(completed) + len(resumed_failures),
         desc=f"{job_name} chunks ({workers} workers)",
         unit="chunk",
         dynamic_ncols=True,
@@ -1439,7 +1517,7 @@ def run_sorcha_chunks(
         failure_path, catalog_path = write_failure_reports(chunks, failures, catalog_rows)
         print(f"  Wrote failure report to {failure_path}")
         print(f"  Wrote failed catalog rows to {catalog_path}")
-        run_debug_subchunks(
+        debug_results = run_debug_subchunks(
             orbs,
             phys,
             catalog_rows,
@@ -1452,6 +1530,39 @@ def run_sorcha_chunks(
             resume=resume,
             isolate_failing_rows=isolate_failing_rows,
         )
+        if only_chunks is None and isolate_failing_rows and debug_results:
+            unresolved_failures = unresolved_failed_leaf_results(debug_results)
+            if not unresolved_failures:
+                chunks_to_combine = salvage_output_chunks(chunks, failures, debug_results)
+                if not chunks_to_combine:
+                    raise RuntimeError(
+                        f"Sorcha chunk failures for {job_name}; no successful chunks to combine"
+                    )
+
+                isolated_failures = isolated_failed_row_results(debug_results)
+                combine_chunk_outputs(chunks_to_combine, final_output)
+                print(
+                    f"  Combined {len(chunks_to_combine)} parent/debug chunks into {final_output}; "
+                    f"skipped {len(isolated_failures)} isolated failing rows"
+                )
+                audit_path, missing_path, missing_rows = audit_combined_outputs(
+                    chunks_to_combine,
+                    final_output,
+                    catalog_rows,
+                    results_dir=chunks[0].output_path.parent,
+                )
+                print(f"  Wrote output audit to {audit_path}")
+                if missing_rows:
+                    print(
+                        f"  Output audit — missing {missing_rows} chunk output rows; "
+                        f"details in {missing_path}"
+                    )
+                else:
+                    print(
+                        "  Output audit — all chunk object/timestamp pairs are present in combined outputs"
+                    )
+                return True
+
         failure_text = ", ".join(f"chunk {result.chunk.index:05d}: {result.error}" for result in failures)
         raise RuntimeError(f"Sorcha chunk failures for {job_name}: {failure_text}")
 
@@ -1465,7 +1576,12 @@ def run_sorcha_chunks(
 
     combine_chunk_outputs(chunks, final_output)
     print(f"  Combined {len(chunks)} chunks into {final_output}")
-    audit_path, missing_path, missing_rows = audit_combined_outputs(chunks, final_output, catalog_rows)
+    audit_path, missing_path, missing_rows = audit_combined_outputs(
+        chunks,
+        final_output,
+        catalog_rows,
+        results_dir=chunks[0].output_path.parent,
+    )
     print(f"  Wrote output audit to {audit_path}")
     if missing_rows:
         print(f"  Output audit — missing {missing_rows} chunk output rows; details in {missing_path}")
@@ -1488,9 +1604,9 @@ def run_id_set(
     resume=True,
     only_chunks=None,
     catalog_snapshot_path=None,
-    debug_failed_chunk_size=0,
+    debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
-    isolate_failing_rows=False,
+    isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
 ):
     inputs = build_id_set_inputs(objects, ids, job_name, comet)
     if not inputs:
@@ -1530,9 +1646,9 @@ def run_ponder(
     only_chunks=None,
     ignore_objects_path=None,
     ignore_object_ids=None,
-    debug_failed_chunk_size=0,
+    debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
-    isolate_failing_rows=False,
+    isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
 ):
     """Run Ponder on the given configs."""
     db_path = Path(db_path)
