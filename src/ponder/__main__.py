@@ -45,6 +45,16 @@ def main():
         help="If a Sorcha chunk fails, split it into this many rows per debug subchunk",
     )
     parser.add_argument(
+        "--force-debug-chunking",
+        action="store_true",
+        help="With --only-chunks, skip parent chunks and directly run debug subchunks",
+    )
+    parser.add_argument(
+        "--isolate-failing-rows",
+        action="store_true",
+        help="Recursively split failed debug subchunks until failing rows are isolated",
+    )
+    parser.add_argument(
         "--no-resume-chunks",
         action="store_true",
         help="Rerun chunks even if matching completed chunk markers already exist",
@@ -91,6 +101,8 @@ def main():
         ignore_objects_path=args.ignore_objects,
         ignore_object_ids=args.ignore_object,
         debug_failed_chunk_size=args.debug_failed_chunk_size,
+        force_debug_chunking=args.force_debug_chunking,
+        isolate_failing_rows=args.isolate_failing_rows,
     )
 
 

@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 
 import pandas as pd
 from tqdm.auto import tqdm
@@ -40,6 +41,11 @@ class SorchaChunk:
     orbits_path: Path
     physparams_path: Path
     output_path: Path
+    parent_chunk: int | None = None
+    parent_node_id: str | None = None
+    node_id: str | None = None
+    debug_level: int | None = None
+    chunk_size: int | None = None
 
     @property
     def ew_output_path(self):
@@ -52,6 +58,14 @@ class SorchaChunk:
     @property
     def failed_path(self):
         return self.output_path.with_suffix(".failed")
+
+
+@dataclass
+class ChunkRunResult:
+    chunk: SorchaChunk
+    ok: bool
+    error: str
+    metadata: dict
 
 
 def _terminate_process_group(proc):
@@ -248,6 +262,7 @@ def plan_sorcha_chunks(job_name, time, row_count, chunk_size, digest):
                 orbits_path=work_dir / f"{chunk_stem}_orbits.csv",
                 physparams_path=work_dir / f"{chunk_stem}_physparams.csv",
                 output_path=results_dir / f"{chunk_stem}.csv",
+                chunk_size=chunk_size,
             )
         )
 
@@ -271,6 +286,11 @@ def plan_debug_subchunks(parent_chunk, subchunk_size):
                 orbits_path=debug_work_dir / f"{chunk_stem}_orbits.csv",
                 physparams_path=debug_work_dir / f"{chunk_stem}_physparams.csv",
                 output_path=debug_results_dir / f"{chunk_stem}.csv",
+                parent_chunk=parent_chunk.index,
+                parent_node_id=parent_chunk.node_id,
+                node_id=chunk_stem,
+                debug_level=1,
+                chunk_size=subchunk_size,
             )
         )
 
@@ -282,10 +302,124 @@ def chunk_is_complete(chunk):
 
 
 def write_chunk_inputs(chunk, orbs, phys):
+    started = perf_counter()
     chunk.orbits_path.parent.mkdir(parents=True, exist_ok=True)
     chunk.physparams_path.parent.mkdir(parents=True, exist_ok=True)
     orbs.iloc[chunk.row_start : chunk.row_end].to_csv(chunk.orbits_path, index=False)
     phys.iloc[chunk.row_start : chunk.row_end].to_csv(chunk.physparams_path, index=False)
+    return perf_counter() - started
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _read_json_file(path):
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def chunk_run_metadata(
+    chunk,
+    status,
+    error="",
+    started_at="",
+    completed_at="",
+    input_write_seconds=0.0,
+    sorcha_seconds=0.0,
+    resumed=False,
+    worker_count=1,
+):
+    row_count = chunk.row_end - chunk.row_start
+    duration_seconds = input_write_seconds + sorcha_seconds
+    parent_chunk = chunk.parent_chunk if chunk.parent_chunk is not None else chunk.index
+    debug_level = "" if chunk.debug_level is None else chunk.debug_level
+    return {
+        "chunk": chunk.index,
+        "parent_chunk": parent_chunk,
+        "node_id": chunk.node_id or "",
+        "parent_node_id": chunk.parent_node_id or "",
+        "debug_level": debug_level,
+        "row_start": chunk.row_start,
+        "row_end": chunk.row_end,
+        "row_count": row_count,
+        "status": status,
+        "error": error or "",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "duration_seconds": duration_seconds,
+        "input_write_seconds": input_write_seconds,
+        "sorcha_seconds": sorcha_seconds,
+        "timed_out": "timed out" in (error or "").lower(),
+        "resumed": resumed,
+        "worker_count": worker_count,
+        "chunk_size": chunk.chunk_size or row_count,
+        "failed_path": "" if status == "done" else str(chunk.failed_path),
+        "orbits_path": str(chunk.orbits_path),
+        "physparams_path": str(chunk.physparams_path),
+        "output_path": str(chunk.output_path),
+    }
+
+
+def normalize_chunk_run_metadata(chunk, marker, status, resumed, worker_count):
+    error = marker.get("error", "")
+    input_write_seconds = float(marker.get("input_write_seconds", 0.0) or 0.0)
+    sorcha_seconds = float(marker.get("sorcha_seconds", marker.get("duration_seconds", 0.0)) or 0.0)
+    metadata = chunk_run_metadata(
+        chunk,
+        status,
+        error=error,
+        started_at=marker.get("started_at", ""),
+        completed_at=marker.get("completed_at", marker.get("failed_at", "")),
+        input_write_seconds=input_write_seconds,
+        sorcha_seconds=sorcha_seconds,
+        resumed=resumed,
+        worker_count=worker_count,
+    )
+    for key, value in marker.items():
+        if key in metadata:
+            metadata[key] = value
+    metadata["status"] = status
+    metadata["resumed"] = resumed
+    metadata["worker_count"] = worker_count
+    metadata["failed_path"] = "" if status == "done" else str(chunk.failed_path)
+    return metadata
+
+
+def result_from_completed_chunk(chunk, worker_count):
+    metadata = normalize_chunk_run_metadata(
+        chunk,
+        _read_json_file(chunk.done_path),
+        status="done",
+        resumed=True,
+        worker_count=worker_count,
+    )
+    return ChunkRunResult(chunk=chunk, ok=True, error="", metadata=metadata)
+
+
+def result_from_failed_chunk(chunk, worker_count):
+    metadata = normalize_chunk_run_metadata(
+        chunk,
+        _read_json_file(chunk.failed_path),
+        status="failed",
+        resumed=True,
+        worker_count=worker_count,
+    )
+    return ChunkRunResult(chunk=chunk, ok=False, error=metadata.get("error", ""), metadata=metadata)
+
+
+def forced_chunk_failure(chunk, worker_count, reason="Forced debug chunking"):
+    metadata = chunk_run_metadata(
+        chunk,
+        "failed",
+        error=reason,
+        completed_at=_utc_now(),
+        resumed=False,
+        worker_count=worker_count,
+    )
+    return ChunkRunResult(chunk=chunk, ok=False, error=reason, metadata=metadata)
 
 
 def write_chunk_manifest(manifest_path, chunks, job_name, row_count, chunk_size, digest):
@@ -322,19 +456,10 @@ def write_failure_reports(chunks, failures, catalog_rows):
 
     failure_rows = []
     failed_catalog_rows = []
-    for chunk, error in failures:
-        failure_rows.append(
-            {
-                "chunk": chunk.index,
-                "row_start": chunk.row_start,
-                "row_end": chunk.row_end,
-                "error": error,
-                "failed_path": str(chunk.failed_path),
-                "orbits_path": str(chunk.orbits_path),
-                "physparams_path": str(chunk.physparams_path),
-                "output_path": str(chunk.output_path),
-            }
-        )
+    for result in failures:
+        chunk = result.chunk
+        error = result.error
+        failure_rows.append(result.metadata)
 
         rows = catalog_rows.iloc[chunk.row_start : chunk.row_end].copy()
         rows.insert(0, "chunk", chunk.index)
@@ -359,6 +484,18 @@ def debug_report_paths(chunks):
     return results_dir / "subchunk_debug_report.csv", results_dir / "failed_subchunk_catalog_rows.csv"
 
 
+def debug_dir_for_chunk(chunk):
+    if chunk.output_path.parent.name == "debug":
+        return chunk.output_path.parent
+    return chunk.output_path.parent / "debug"
+
+
+def debug_work_dir_for_chunk(chunk):
+    if chunk.orbits_path.parent.name == "debug":
+        return chunk.orbits_path.parent
+    return chunk.orbits_path.parent / "debug"
+
+
 def write_debug_subchunk_reports(chunks, results, parent_by_subchunk, catalog_rows):
     if not chunks:
         return None, None
@@ -368,22 +505,15 @@ def write_debug_subchunk_reports(chunks, results, parent_by_subchunk, catalog_ro
 
     report_rows = []
     failed_catalog_rows = []
-    for subchunk, ok, error in results:
+    for result in results:
+        subchunk = result.chunk
+        ok = result.ok
+        error = result.error
         parent_chunk = parent_by_subchunk[subchunk]
-        report_rows.append(
-            {
-                "parent_chunk": parent_chunk.index,
-                "subchunk": subchunk.index,
-                "row_start": subchunk.row_start,
-                "row_end": subchunk.row_end,
-                "status": "done" if ok else "failed",
-                "error": error or "",
-                "failed_path": "" if ok else str(subchunk.failed_path),
-                "orbits_path": str(subchunk.orbits_path),
-                "physparams_path": str(subchunk.physparams_path),
-                "output_path": str(subchunk.output_path),
-            }
-        )
+        report_row = dict(result.metadata)
+        report_row["parent_chunk"] = parent_chunk.index
+        report_row["subchunk"] = subchunk.index
+        report_rows.append(report_row)
 
         if not ok:
             rows = catalog_rows.iloc[subchunk.row_start : subchunk.row_end].copy()
@@ -411,34 +541,187 @@ def write_debug_subchunk_reports(chunks, results, parent_by_subchunk, catalog_ro
     return report_path, catalog_path
 
 
-def run_sorcha_chunk(chunk, db, config, timeout):
+def isolation_report_paths(debug_dir):
+    return (
+        debug_dir / "isolation_report.csv",
+        debug_dir / "failing_rows.csv",
+        debug_dir / "group_failures.csv",
+        debug_dir / "debug_timing_summary.csv",
+    )
+
+
+def sort_chunk_results(results):
+    return sorted(
+        results,
+        key=lambda result: (
+            result.metadata.get("parent_chunk", -1),
+            result.metadata.get("debug_level", -1),
+            result.chunk.row_start,
+            result.chunk.row_end,
+            result.metadata.get("node_id", ""),
+        ),
+    )
+
+
+def write_timing_summary(results, timing_path, wall_time_seconds=0.0):
+    timing_path.parent.mkdir(parents=True, exist_ok=True)
+    if not results:
+        pd.DataFrame(
+            columns=[
+                "debug_level",
+                "row_count",
+                "total_ranges",
+                "completed",
+                "failed",
+                "resumed",
+                "mean_sorcha_seconds",
+                "median_sorcha_seconds",
+                "max_sorcha_seconds",
+                "total_duration_seconds",
+                "total_input_write_seconds",
+                "wall_time_seconds",
+            ]
+        ).to_csv(timing_path, index=False)
+        return timing_path
+
+    df = pd.DataFrame([result.metadata for result in results])
+    summary = (
+        df.groupby(["debug_level", "row_count"], dropna=False)
+        .agg(
+            total_ranges=("status", "size"),
+            completed=("status", lambda values: (values == "done").sum()),
+            failed=("status", lambda values: (values == "failed").sum()),
+            resumed=("resumed", "sum"),
+            mean_sorcha_seconds=("sorcha_seconds", "mean"),
+            median_sorcha_seconds=("sorcha_seconds", "median"),
+            max_sorcha_seconds=("sorcha_seconds", "max"),
+            total_duration_seconds=("duration_seconds", "sum"),
+            total_input_write_seconds=("input_write_seconds", "sum"),
+        )
+        .reset_index()
+    )
+    summary["wall_time_seconds"] = wall_time_seconds
+    summary.to_csv(timing_path, index=False)
+    return timing_path
+
+
+def catalog_rows_for_results(results, catalog_rows, metadata_prefix):
+    rows = []
+    for result in results:
+        chunk = result.chunk
+        chunk_rows = catalog_rows.iloc[chunk.row_start : chunk.row_end].copy()
+        for key in reversed(
+            [
+                "parent_chunk",
+                "node_id",
+                "parent_node_id",
+                "debug_level",
+                "row_start",
+                "row_end",
+                "row_count",
+                "status",
+                "error",
+                "duration_seconds",
+                "sorcha_seconds",
+                "resumed",
+            ]
+        ):
+            chunk_rows.insert(0, f"{metadata_prefix}_{key}", result.metadata.get(key, ""))
+        rows.append(chunk_rows)
+
+    if rows:
+        return pd.concat(rows, ignore_index=True)
+
+    metadata_columns = [
+        f"{metadata_prefix}_{key}"
+        for key in [
+            "parent_chunk",
+            "node_id",
+            "parent_node_id",
+            "debug_level",
+            "row_start",
+            "row_end",
+            "row_count",
+            "status",
+            "error",
+            "duration_seconds",
+            "sorcha_seconds",
+            "resumed",
+        ]
+    ]
+    return pd.DataFrame(columns=metadata_columns + list(catalog_rows.columns))
+
+
+def write_isolation_reports(
+    debug_dir, results, failing_rows, group_failures, catalog_rows, wall_time_seconds
+):
+    report_path, failing_rows_path, group_failures_path, timing_path = isolation_report_paths(debug_dir)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame([result.metadata for result in sort_chunk_results(results)]).to_csv(report_path, index=False)
+    catalog_rows_for_results(failing_rows, catalog_rows, "failure").to_csv(failing_rows_path, index=False)
+
+    group_rows = []
+    for result in group_failures:
+        row = dict(result.metadata)
+        row["failure_type"] = "group_failed_children_passed"
+        group_rows.append(row)
+    group_columns = list(results[0].metadata.keys()) if results else []
+    if "failure_type" not in group_columns:
+        group_columns.append("failure_type")
+    pd.DataFrame(group_rows, columns=group_columns).to_csv(group_failures_path, index=False)
+    write_timing_summary(results, timing_path, wall_time_seconds=wall_time_seconds)
+
+    return report_path, failing_rows_path, group_failures_path, timing_path
+
+
+def run_sorcha_chunk(chunk, db, config, timeout, input_write_seconds=0.0, worker_count=1):
     chunk.output_path.parent.mkdir(parents=True, exist_ok=True)
     if chunk.done_path.exists():
         chunk.done_path.unlink()
     if chunk.failed_path.exists():
         chunk.failed_path.unlink()
 
+    started_at = _utc_now()
+    started = perf_counter()
     try:
         run_sorcha(chunk.orbits_path, chunk.physparams_path, chunk.output_path, db, config, timeout=timeout)
     except Exception as exc:
+        sorcha_seconds = perf_counter() - started
+        completed_at = _utc_now()
+        metadata = chunk_run_metadata(
+            chunk,
+            "failed",
+            error=str(exc),
+            started_at=started_at,
+            completed_at=completed_at,
+            input_write_seconds=input_write_seconds,
+            sorcha_seconds=sorcha_seconds,
+            resumed=False,
+            worker_count=worker_count,
+        )
         failure = {
             "failed_at": datetime.now(timezone.utc).isoformat(),
-            "chunk": chunk.index,
-            "row_start": chunk.row_start,
-            "row_end": chunk.row_end,
-            "error": str(exc),
+            **metadata,
         }
         chunk.failed_path.write_text(json.dumps(failure, indent=2))
-        return chunk, False, str(exc)
+        return ChunkRunResult(chunk=chunk, ok=False, error=str(exc), metadata=metadata)
 
-    success = {
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-        "chunk": chunk.index,
-        "row_start": chunk.row_start,
-        "row_end": chunk.row_end,
-    }
+    sorcha_seconds = perf_counter() - started
+    completed_at = _utc_now()
+    metadata = chunk_run_metadata(
+        chunk,
+        "done",
+        started_at=started_at,
+        completed_at=completed_at,
+        input_write_seconds=input_write_seconds,
+        sorcha_seconds=sorcha_seconds,
+        resumed=False,
+        worker_count=worker_count,
+    )
+    success = {"completed_at": completed_at, **metadata}
     chunk.done_path.write_text(json.dumps(success, indent=2))
-    return chunk, True, None
+    return ChunkRunResult(chunk=chunk, ok=True, error="", metadata=metadata)
 
 
 def run_debug_subchunks(
@@ -452,40 +735,60 @@ def run_debug_subchunks(
     workers,
     timeout=None,
     resume=True,
+    isolate_failing_rows=False,
 ):
     if subchunk_size <= 0 or not parent_failures:
         return []
 
     parent_by_subchunk = {}
     debug_chunks = []
-    for parent_chunk, _ in parent_failures:
+    for parent_failure in parent_failures:
+        parent_chunk = parent_failure.chunk
         for subchunk in plan_debug_subchunks(parent_chunk, subchunk_size):
             debug_chunks.append(subchunk)
             parent_by_subchunk[subchunk] = parent_chunk
 
     completed = [chunk for chunk in debug_chunks if resume and chunk_is_complete(chunk)]
-    pending = [chunk for chunk in debug_chunks if chunk not in completed]
+    resumed_failures = [chunk for chunk in debug_chunks if resume and chunk.failed_path.exists()]
+    pending = [chunk for chunk in debug_chunks if chunk not in completed and chunk not in resumed_failures]
     print(
         f"  Debug subchunks — {len(debug_chunks)} total, "
-        f"{len(completed)} complete, {len(pending)} pending, size={subchunk_size}, workers={workers}"
+        f"{len(completed)} complete, {len(resumed_failures)} failed, "
+        f"{len(pending)} pending, size={subchunk_size}, workers={workers}"
     )
 
+    input_write_seconds = {}
     for chunk in pending:
-        write_chunk_inputs(chunk, orbs, phys)
+        input_write_seconds[chunk] = write_chunk_inputs(chunk, orbs, phys)
 
-    results = [(chunk, True, None) for chunk in completed]
+    results = [result_from_completed_chunk(chunk, workers) for chunk in completed]
+    results.extend(result_from_failed_chunk(chunk, workers) for chunk in resumed_failures)
     with tqdm(
         total=len(debug_chunks),
-        initial=len(completed),
+        initial=len(completed) + len(resumed_failures),
         desc=f"Debug subchunks ({workers} workers, size={subchunk_size})",
         unit="subchunk",
         dynamic_ncols=True,
     ) as progress:
         if pending:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(run_sorcha_chunk, chunk, db, config, timeout) for chunk in pending]
+                futures = [
+                    executor.submit(
+                        run_sorcha_chunk,
+                        chunk,
+                        db,
+                        config,
+                        timeout,
+                        input_write_seconds=input_write_seconds[chunk],
+                        worker_count=workers,
+                    )
+                    for chunk in pending
+                ]
                 for future in as_completed(futures):
-                    chunk, ok, error = future.result()
+                    result = future.result()
+                    chunk = result.chunk
+                    ok = result.ok
+                    error = result.error
                     parent_chunk = parent_by_subchunk[chunk]
                     label = (
                         f"chunk {parent_chunk.index:05d} debug {chunk.index:04d} "
@@ -495,19 +798,197 @@ def run_debug_subchunks(
                         progress.write(f"  [debug done] {label}")
                     else:
                         progress.write(f"  [debug failed] {label}: {error}")
-                    results.append((chunk, ok, error))
+                    results.append(result)
                     progress.update(1)
 
     report_path, catalog_path = write_debug_subchunk_reports(
         debug_chunks,
-        sorted(results, key=lambda result: (parent_by_subchunk[result[0]].index, result[0].index)),
+        sorted(results, key=lambda result: (parent_by_subchunk[result.chunk].index, result.chunk.index)),
         parent_by_subchunk,
         catalog_rows,
     )
     print(f"  Wrote debug subchunk report to {report_path}")
     print(f"  Wrote failed debug catalog rows to {catalog_path}")
+    timing_path = debug_dir_for_chunk(debug_chunks[0]) / "debug_timing_summary.csv"
+    write_timing_summary(results, timing_path)
+    print(f"  Wrote debug timing summary to {timing_path}")
+
+    if isolate_failing_rows:
+        run_failing_row_isolation(
+            sort_chunk_results(results),
+            orbs,
+            phys,
+            catalog_rows,
+            db,
+            config,
+            workers,
+            timeout,
+            resume,
+        )
 
     return results
+
+
+def split_isolation_chunk(chunk, level, start_index):
+    row_count = chunk.row_end - chunk.row_start
+    if row_count <= 1:
+        return []
+
+    parent_chunk = chunk.parent_chunk if chunk.parent_chunk is not None else chunk.index
+    midpoint = chunk.row_start + row_count // 2
+    ranges = [(chunk.row_start, midpoint), (midpoint, chunk.row_end)]
+    work_dir = debug_work_dir_for_chunk(chunk)
+    results_dir = debug_dir_for_chunk(chunk)
+    parent_node_id = chunk.node_id or f"chunk_{chunk.index:05d}"
+    children = []
+    for offset, (row_start, row_end) in enumerate(ranges):
+        child_index = start_index + offset
+        chunk_stem = (
+            f"chunk_{parent_chunk:05d}_isolate_l{level:02d}_{child_index:04d}_"
+            f"rows_{row_start:07d}_{row_end - 1:07d}"
+        )
+        children.append(
+            SorchaChunk(
+                index=child_index,
+                row_start=row_start,
+                row_end=row_end,
+                orbits_path=work_dir / f"{chunk_stem}_orbits.csv",
+                physparams_path=work_dir / f"{chunk_stem}_physparams.csv",
+                output_path=results_dir / f"{chunk_stem}.csv",
+                parent_chunk=parent_chunk,
+                parent_node_id=parent_node_id,
+                node_id=chunk_stem,
+                debug_level=level,
+                chunk_size=row_end - row_start,
+            )
+        )
+    return children
+
+
+def run_isolation_level(chunks, orbs, phys, db, config, workers, timeout=None, resume=True, level=1):
+    completed = [chunk for chunk in chunks if resume and chunk_is_complete(chunk)]
+    resumed_failures = [chunk for chunk in chunks if resume and chunk.failed_path.exists()]
+    pending = [chunk for chunk in chunks if chunk not in completed and chunk not in resumed_failures]
+    input_write_seconds = {}
+    for chunk in pending:
+        input_write_seconds[chunk] = write_chunk_inputs(chunk, orbs, phys)
+
+    results = [result_from_completed_chunk(chunk, workers) for chunk in completed]
+    results.extend(result_from_failed_chunk(chunk, workers) for chunk in resumed_failures)
+    with tqdm(
+        total=len(chunks),
+        initial=len(completed) + len(resumed_failures),
+        desc=f"Isolation level {level} ({workers} workers)",
+        unit="range",
+        dynamic_ncols=True,
+    ) as progress:
+        if pending:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(
+                        run_sorcha_chunk,
+                        chunk,
+                        db,
+                        config,
+                        timeout,
+                        input_write_seconds=input_write_seconds[chunk],
+                        worker_count=workers,
+                    )
+                    for chunk in pending
+                ]
+                for future in as_completed(futures):
+                    result = future.result()
+                    chunk = result.chunk
+                    label = (
+                        f"parent {result.metadata.get('parent_chunk')} level {level} "
+                        f"rows {chunk.row_start}-{chunk.row_end - 1}"
+                    )
+                    if result.ok:
+                        progress.write(f"  [isolation done] {label}")
+                    else:
+                        progress.write(f"  [isolation failed] {label}: {result.error}")
+                    results.append(result)
+                    progress.update(1)
+
+    return sort_chunk_results(results)
+
+
+def run_failing_row_isolation(
+    first_level_results, orbs, phys, catalog_rows, db, config, workers, timeout, resume
+):
+    if not first_level_results:
+        return []
+
+    debug_dir = debug_dir_for_chunk(first_level_results[0].chunk)
+    started = perf_counter()
+    all_results = sort_chunk_results(first_level_results)
+    current_failures = [result for result in all_results if not result.ok]
+    failing_rows = []
+    group_failures = []
+    level = 2
+
+    while current_failures:
+        parent_children = []
+        next_level_chunks = []
+        child_index = 0
+
+        for result in current_failures:
+            chunk = result.chunk
+            if chunk.row_end - chunk.row_start <= 1:
+                failing_rows.append(result)
+                continue
+
+            children = split_isolation_chunk(chunk, level, child_index)
+            child_index += len(children)
+            parent_children.append((result, children))
+            next_level_chunks.extend(children)
+
+        if not next_level_chunks:
+            break
+
+        print(
+            f"  Isolation level {level} — {len(next_level_chunks)} ranges from "
+            f"{len(parent_children)} failed parent ranges, workers={workers}"
+        )
+        level_results = run_isolation_level(
+            next_level_chunks,
+            orbs,
+            phys,
+            db,
+            config,
+            workers,
+            timeout=timeout,
+            resume=resume,
+            level=level,
+        )
+        all_results.extend(level_results)
+        results_by_chunk = {result.chunk: result for result in level_results}
+
+        current_failures = []
+        for parent_result, children in parent_children:
+            child_results = [results_by_chunk[child] for child in children]
+            failed_children = [result for result in child_results if not result.ok]
+            if failed_children:
+                current_failures.extend(failed_children)
+            else:
+                group_failures.append(parent_result)
+
+        level += 1
+
+    report_path, failing_rows_path, group_failures_path, timing_path = write_isolation_reports(
+        debug_dir,
+        sort_chunk_results(all_results),
+        sort_chunk_results(failing_rows),
+        sort_chunk_results(group_failures),
+        catalog_rows,
+        wall_time_seconds=perf_counter() - started,
+    )
+    print(f"  Wrote isolation report to {report_path}")
+    print(f"  Wrote failing rows to {failing_rows_path}")
+    print(f"  Wrote group failures to {group_failures_path}")
+    print(f"  Wrote debug timing summary to {timing_path}")
+
+    return all_results
 
 
 def combine_csv_files(input_paths, output_path):
@@ -548,6 +1029,8 @@ def run_sorcha_chunks(
     only_chunks=None,
     catalog_rows=None,
     debug_failed_chunk_size=0,
+    force_debug_chunking=False,
+    isolate_failing_rows=False,
 ):
     workers = max(1, workers)
     if len(orbs) != len(phys):
@@ -557,6 +1040,12 @@ def run_sorcha_chunks(
     catalog_rows = catalog_rows.reset_index(drop=True)
     if len(catalog_rows) != len(orbs):
         raise ValueError("Catalog row count does not match Sorcha input length")
+    if force_debug_chunking and only_chunks is None:
+        raise ValueError("--force-debug-chunking requires selected chunks")
+    if force_debug_chunking and debug_failed_chunk_size <= 0:
+        raise ValueError("--force-debug-chunking requires a positive debug chunk size")
+    if isolate_failing_rows and debug_failed_chunk_size <= 0:
+        raise ValueError("--isolate-failing-rows requires a positive debug chunk size")
 
     if chunk_size <= 0:
         orbits_path = WORK_DIR / f"job_{job_name}_orbits.csv"
@@ -581,6 +1070,28 @@ def run_sorcha_chunks(
     manifest_path = chunks[0].orbits_path.parent / "manifest.json"
     write_chunk_manifest(manifest_path, chunks, job_name, len(orbs), chunk_size, digest)
 
+    if force_debug_chunking:
+        print(
+            f"  Force debug chunking — {job_name}: selected={len(chunks_to_run)}, "
+            f"debug size={debug_failed_chunk_size}, workers={workers}"
+        )
+        parent_failures = [forced_chunk_failure(chunk, workers) for chunk in chunks_to_run]
+        run_debug_subchunks(
+            orbs,
+            phys,
+            catalog_rows,
+            parent_failures,
+            db,
+            config,
+            debug_failed_chunk_size,
+            workers,
+            timeout=timeout,
+            resume=resume,
+            isolate_failing_rows=isolate_failing_rows,
+        )
+        print(f"  Completed forced debug chunking for {job_name}; skipping final combine and state update")
+        return False
+
     completed = [chunk for chunk in chunks_to_run if resume and chunk_is_complete(chunk)]
     pending = [chunk for chunk in chunks_to_run if chunk not in completed]
     final_output = RESULTS_DIR / f"{time[:10]}_job_{job_name}.csv"
@@ -602,19 +1113,34 @@ def run_sorcha_chunks(
         dynamic_ncols=True,
     ) as progress:
         if pending:
+            input_write_seconds = {}
             for chunk in pending:
-                write_chunk_inputs(chunk, orbs, phys)
+                input_write_seconds[chunk] = write_chunk_inputs(chunk, orbs, phys)
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(run_sorcha_chunk, chunk, db, config, timeout) for chunk in pending]
+                futures = [
+                    executor.submit(
+                        run_sorcha_chunk,
+                        chunk,
+                        db,
+                        config,
+                        timeout,
+                        input_write_seconds=input_write_seconds[chunk],
+                        worker_count=workers,
+                    )
+                    for chunk in pending
+                ]
                 for future in as_completed(futures):
-                    chunk, ok, error = future.result()
+                    result = future.result()
+                    chunk = result.chunk
+                    ok = result.ok
+                    error = result.error
                     label = f"chunk {chunk.index:05d} rows {chunk.row_start}-{chunk.row_end - 1}"
                     if ok:
                         progress.write(f"  [done] {label}")
                     else:
                         progress.write(f"  [failed] {label}: {error}")
-                        failures.append((chunk, error))
+                        failures.append(result)
                     progress.update(1)
 
     if failures:
@@ -632,8 +1158,9 @@ def run_sorcha_chunks(
             workers,
             timeout=timeout,
             resume=resume,
+            isolate_failing_rows=isolate_failing_rows,
         )
-        failure_text = ", ".join(f"chunk {chunk.index:05d}: {error}" for chunk, error in failures)
+        failure_text = ", ".join(f"chunk {result.chunk.index:05d}: {result.error}" for result in failures)
         raise RuntimeError(f"Sorcha chunk failures for {job_name}: {failure_text}")
 
     if only_chunks is not None:
@@ -663,6 +1190,8 @@ def run_id_set(
     resume=True,
     only_chunks=None,
     debug_failed_chunk_size=0,
+    force_debug_chunking=False,
+    isolate_failing_rows=False,
 ):
     inputs = build_id_set_inputs(objects, ids, job_name, comet)
     if not inputs:
@@ -683,6 +1212,8 @@ def run_id_set(
         only_chunks=only_chunks,
         catalog_rows=catalog_rows,
         debug_failed_chunk_size=debug_failed_chunk_size,
+        force_debug_chunking=force_debug_chunking,
+        isolate_failing_rows=isolate_failing_rows,
     )
 
 
@@ -700,6 +1231,8 @@ def run_ponder(
     ignore_objects_path=None,
     ignore_object_ids=None,
     debug_failed_chunk_size=0,
+    force_debug_chunking=False,
+    isolate_failing_rows=False,
 ):
     """Run Ponder on the given configs."""
     db_path = Path(db_path)
@@ -707,6 +1240,12 @@ def run_ponder(
     config_path = Path(config_path)
     sorcha_workers = max(1, sorcha_workers)
     selected_chunks = parse_chunk_indices(only_chunks)
+    if force_debug_chunking and selected_chunks is None:
+        raise ValueError("--force-debug-chunking requires --only-chunks")
+    if force_debug_chunking and debug_failed_chunk_size <= 0:
+        raise ValueError("--force-debug-chunking requires --debug-failed-chunk-size > 0")
+    if isolate_failing_rows and debug_failed_chunk_size <= 0:
+        raise ValueError("--isolate-failing-rows requires --debug-failed-chunk-size > 0")
 
     WORK_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -756,6 +1295,8 @@ def run_ponder(
         resume=resume_chunks,
         only_chunks=selected_chunks,
         debug_failed_chunk_size=debug_failed_chunk_size,
+        force_debug_chunking=force_debug_chunking,
+        isolate_failing_rows=isolate_failing_rows,
     )
 
     updated_done = run_id_set(
@@ -772,6 +1313,8 @@ def run_ponder(
         resume=resume_chunks,
         only_chunks=selected_chunks,
         debug_failed_chunk_size=debug_failed_chunk_size,
+        force_debug_chunking=force_debug_chunking,
+        isolate_failing_rows=isolate_failing_rows,
     )
 
     if not unchanged_and_new_done or not updated_done:

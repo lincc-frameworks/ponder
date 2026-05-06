@@ -87,6 +87,30 @@ Debug subchunks get their own progress bar and write:
 - `results/<date>_job_<job>_<digest>/debug/subchunk_debug_report.csv`
 - `results/<date>_job_<job>_<digest>/debug/failed_subchunk_catalog_rows.csv`
 
+To keep subdividing failed debug ranges until Ponder identifies individual
+failing rows, add `--isolate-failing-rows`. If you already know which parent
+chunks failed, add `--force-debug-chunking` with `--only-chunks` to skip the
+5000-row parent timeout and go directly to resumable debug ranges:
+
+```bash
+ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-2026.json --db from_rubin_dp1.db \
+  --only-chunks 289-291,301 \
+  --sorcha-timeout 900 \
+  --debug-failed-chunk-size 250 \
+  --sorcha-workers 3 \
+  --force-debug-chunking \
+  --isolate-failing-rows
+```
+
+Recursive isolation writes additive reports in the debug directory:
+
+- `isolation_report.csv` lists every tested range and whether it ran, resumed,
+  completed, or failed.
+- `failing_rows.csv` contains only size-1 ranges that still fail, with the
+  original catalog columns.
+- `group_failures.csv` lists failed ranges whose smaller child ranges passed.
+- `debug_timing_summary.csv` summarizes timing by debug level and row count.
+
 ## Dev Guide - Getting Started
 
 Before installing any dependencies or writing code, it's a great idea to create a
