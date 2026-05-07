@@ -100,6 +100,8 @@ def _has_arc_years(obj):
     if _is_missing(arc_length):
         return False
 
+    # MPCORB sometimes records long arcs as a year range in Arc_length instead
+    # of populating Arc_years; treat that as a long-enough observation history.
     return bool(re.fullmatch(r"\d{4}\s*-\s*\d{4}", str(arc_length).strip()))
 
 
@@ -109,6 +111,8 @@ def _arc_length_days(obj):
         return None
 
     if isinstance(arc_length, str):
+        # Accept values like "2 days" while still rejecting year ranges, which
+        # are handled by _has_arc_years before day-length filtering.
         match = re.search(r"\d+(?:\.\d+)?", arc_length)
         if not match:
             return None
@@ -126,6 +130,8 @@ def mpcorb_observation_arc_at_least(obj, minimum_days=MPCORB_OBSERVATION_ARC_LIM
 
 
 def keep_mpcorb_object(obj):
+    # Keep objects that are either distant, well
+    # constrained, or observed over enough time to be worth a Sorcha run.
     semimajor_axis = _float_or_none(obj.get("a"))
     if semimajor_axis is not None and semimajor_axis > MPCORB_SEMIMAJOR_AXIS_LIMIT_AU:
         return True

@@ -25,6 +25,9 @@ DEFAULT_SORCHA_WORKERS = 1
 DEFAULT_DEBUG_FAILED_CHUNK_SIZE = 250
 DEFAULT_ISOLATE_FAILING_ROWS = True
 CATALOG_ROW_COLUMN = "ponder_catalog_row"
+
+# Sorcha output schemas have shifted between releases, so audits look for the
+# first usable object/time columns instead of assuming one fixed CSV shape.
 OUTPUT_ID_COLUMNS = [
     "ObjID",
     "objectId",
@@ -52,12 +55,14 @@ def object_hashes(objects):
 
 
 def _state_path_token(path):
+    """Return a filesystem-safe label for run state files."""
     stem = Path(path).stem or "pointings"
     safe = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in stem)
     return safe[:80] or "pointings"
 
 
 def state_files_for_run(db_path, comet):
+    """Scope incremental state to the pointing DB and object mode."""
     mode = "comets" if comet else "asteroids"
     db_path = Path(db_path).expanduser().resolve()
     digest = hashlib.sha256(f"{db_path}|{mode}".encode()).hexdigest()[:12]
@@ -66,6 +71,7 @@ def state_files_for_run(db_path, comet):
 
 
 def path_fingerprint(path):
+    """Fingerprint path identity plus cheap file metadata for resume scoping."""
     path = Path(path).expanduser().resolve()
     try:
         stat = path.stat()
@@ -76,6 +82,7 @@ def path_fingerprint(path):
 
 
 def run_context_digest(db_path, config_path, comet, **metadata):
+    """Build a resume namespace for chunks that depend on DB/config context."""
     mode = "comets" if comet else "asteroids"
     parts = [
         f"mode={mode}",
@@ -89,6 +96,8 @@ def run_context_digest(db_path, config_path, comet, **metadata):
 
 @dataclass(frozen=True)
 class SorchaChunk:
+    """A row range plus the concrete input, output, and marker files it owns."""
+
     index: int
     row_start: int
     row_end: int
@@ -123,6 +132,7 @@ class ChunkRunResult:
 
 
 def _terminate_process_group(proc):
+    """Stop Sorcha and any child processes it launched after a timeout."""
     if proc.poll() is not None:
         return
 
@@ -192,6 +202,8 @@ def build_id_set_inputs(objects, ids, job_name, comet):
         print(f"  [skipping {job_name} — no valid Sorcha inputs]")
         return
 
+    # Keep catalog rows aligned one-to-one with the Sorcha inputs after any
+    # conversion-time drops, so later failure reports point at the right object.
     catalog_rows = catalog_rows_for_sorcha_inputs(objects, ids, comet)
     if len(catalog_rows) != len(orbs):
         raise ValueError(
@@ -238,6 +250,8 @@ def read_ignore_ids(ignore_objects_path=None, ignore_object_ids=None):
     path = Path(ignore_objects_path)
     if path.suffix.lower() == ".csv":
         df = pd.read_csv(path, dtype=str)
+        # Prefer known MPC/Sorcha ID columns, but accept a one-column ad hoc CSV
+        # so manual ignore lists do not need a strict header.
         for column in ["ObjID", "Principal_desig", "Provisional_packed_desig", "Designation_and_name"]:
             if column in df.columns:
                 ids.update(value.strip() for value in df[column].dropna() if value.strip())
@@ -274,6 +288,7 @@ def read_json_catalog(path):
 
 
 def annotate_catalog_row_numbers(objects):
+    """Attach original catalog positions before filtering or chunk splitting."""
     for row_number, obj in enumerate(objects):
         if isinstance(obj, dict):
             obj[CATALOG_ROW_COLUMN] = row_number
@@ -290,6 +305,7 @@ def _catalog_snapshot_stem(path):
 
 
 def write_mpc_catalog_snapshot(object_path, results_dir, timestamp):
+    """Copy the exact MPC source catalog into results for debug reproducibility."""
     object_path = Path(object_path)
     snapshot_dir = Path(results_dir) / "catalogs"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +315,8 @@ def write_mpc_catalog_snapshot(object_path, results_dir, timestamp):
 
     digest = hashlib.sha256()
     source_open = gzip.open if object_path.suffix.lower() == ".gz" else open
+    # Normalize gzip metadata while preserving catalog bytes and row order; this
+    # makes snapshot names content-addressed and stable across reruns.
     with (
         source_open(object_path, "rb") as src,
         gzip.GzipFile(filename=str(tmp_path), mode="wb", mtime=0) as dst,
@@ -317,6 +335,7 @@ def write_mpc_catalog_snapshot(object_path, results_dir, timestamp):
 
 
 def dataframe_digest(*frames):
+    """Hash Sorcha input content so chunk directories match the rows they run."""
     digest = hashlib.sha256()
     for frame in frames:
         digest.update("|".join(frame.columns).encode())
@@ -352,6 +371,8 @@ def parse_chunk_indices(spec):
 def plan_sorcha_chunks(job_name, time, row_count, chunk_size, digest):
     base_stem = f"{time[:10]}_job_{job_name}"
     run_stem = f"{base_stem}_{digest[:12]}"
+    # Include the digest in both work and result paths so resume markers from a
+    # previous DB/config/input combination cannot satisfy a different run.
     work_dir = WORK_DIR / run_stem
     results_dir = RESULTS_DIR / run_stem
     chunks = []
@@ -376,6 +397,8 @@ def plan_sorcha_chunks(job_name, time, row_count, chunk_size, digest):
 
 def plan_debug_subchunks(parent_chunk, subchunk_size):
     chunks = []
+    # The first debug pass keeps the parent chunk number in file names so a
+    # failed range can be tied back to the top-level chunk report.
     debug_work_dir = parent_chunk.orbits_path.parent / "debug"
     debug_results_dir = parent_chunk.output_path.parent / "debug"
     for index, row_start in enumerate(range(parent_chunk.row_start, parent_chunk.row_end, subchunk_size)):
@@ -407,6 +430,8 @@ def chunk_is_complete(chunk):
         return False
 
     marker = _read_json_file(chunk.done_path)
+    # Some Sorcha ranges legitimately produce no CSVs; the marker records when
+    # missing outputs are expected so zero-output successes can still resume.
     output_expected = marker.get("output_exists", True)
     ew_output_expected = marker.get("ew_output_exists", True)
     return (not output_expected or chunk.output_path.exists()) and (
@@ -445,6 +470,7 @@ def chunk_run_metadata(
     resumed=False,
     worker_count=1,
 ):
+    """Create the common marker/report schema for chunk attempts."""
     row_count = chunk.row_end - chunk.row_start
     duration_seconds = input_write_seconds + sorcha_seconds
     parent_chunk = chunk.parent_chunk if chunk.parent_chunk is not None else chunk.index
@@ -479,6 +505,7 @@ def chunk_run_metadata(
 
 
 def normalize_chunk_run_metadata(chunk, marker, status, resumed, worker_count):
+    """Read old or current marker files into the current report schema."""
     error = marker.get("error", "")
     input_write_seconds = float(marker.get("input_write_seconds", 0.0) or 0.0)
     sorcha_seconds = float(marker.get("sorcha_seconds", marker.get("duration_seconds", 0.0)) or 0.0)
@@ -587,6 +614,8 @@ def write_failure_reports(chunks, failures, catalog_rows):
         error = result.error
         failure_rows.append(result.metadata)
 
+        # Store the original catalog rows for failed ranges next to the compact
+        # failure summary so investigations do not have to reopen the MPC file.
         rows = catalog_rows.iloc[chunk.row_start : chunk.row_end].copy()
         rows.insert(0, "chunk", chunk.index)
         rows.insert(1, "chunk_row_start", chunk.row_start)
@@ -642,6 +671,8 @@ def write_debug_subchunk_reports(chunks, results, parent_by_subchunk, catalog_ro
         report_rows.append(report_row)
 
         if not ok:
+            # Debug failures often narrow the search dramatically; preserve the
+            # implicated catalog slice at the same granularity as the subchunk.
             rows = catalog_rows.iloc[subchunk.row_start : subchunk.row_end].copy()
             rows.insert(0, "parent_chunk", parent_chunk.index)
             rows.insert(1, "subchunk", subchunk.index)
@@ -693,6 +724,8 @@ def sort_chunk_results(results):
 def write_timing_summary(results, timing_path, wall_time_seconds=0.0):
     timing_path.parent.mkdir(parents=True, exist_ok=True)
     if not results:
+        # Emit headers even for empty debug selections so downstream notebooks
+        # can read the artifact without special casing "no rows".
         pd.DataFrame(
             columns=[
                 "debug_level",
@@ -733,6 +766,7 @@ def write_timing_summary(results, timing_path, wall_time_seconds=0.0):
 
 
 def catalog_rows_for_results(results, catalog_rows, metadata_prefix, extra_metadata=None):
+    """Expand chunk results into catalog-row reports with prefixed metadata."""
     extra_metadata = extra_metadata or {}
     rows = []
     metadata_keys = [
@@ -775,6 +809,7 @@ def catalog_rows_for_results(results, catalog_rows, metadata_prefix, extra_metad
 def write_isolation_reports(
     debug_dir, results, failing_rows, group_failures, catalog_rows, wall_time_seconds
 ):
+    """Write the full recursive isolation trail and row-level debug artifacts."""
     (
         report_path,
         failing_rows_path,
@@ -809,6 +844,8 @@ def write_isolation_reports(
 
 def run_sorcha_chunk(chunk, db, config, timeout, input_write_seconds=0.0, worker_count=1):
     chunk.output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Clear stale markers before each real attempt so a killed or failed retry
+    # cannot leave both success and failure state behind.
     if chunk.done_path.exists():
         chunk.done_path.unlink()
     if chunk.failed_path.exists():
@@ -883,6 +920,8 @@ def run_debug_subchunks(
     completed = [chunk for chunk in debug_chunks if resume and chunk_is_complete(chunk)]
     resumed_failures = [chunk for chunk in debug_chunks if resume and chunk.failed_path.exists()]
     pending = [chunk for chunk in debug_chunks if chunk not in completed and chunk not in resumed_failures]
+    # Treat failed markers as resumable too: the isolation pass can continue
+    # from known-bad ranges without rerunning expensive parent failures.
     print(
         f"  Debug subchunks — {len(debug_chunks)} total, "
         f"{len(completed)} complete, {len(resumed_failures)} failed, "
@@ -966,6 +1005,8 @@ def split_isolation_chunk(chunk, level, start_index):
     if row_count <= 1:
         return []
 
+    # Recursive isolation is a binary search over the original input rows. Each
+    # child carries node IDs so parent failures can be classified after children pass.
     parent_chunk = chunk.parent_chunk if chunk.parent_chunk is not None else chunk.index
     midpoint = chunk.row_start + row_count // 2
     ranges = [(chunk.row_start, midpoint), (midpoint, chunk.row_end)]
@@ -1103,6 +1144,8 @@ def run_failing_row_isolation(
             if failed_children:
                 current_failures.extend(failed_children)
             else:
+                # A parent that fails while both children pass points to a
+                # multi-row/group interaction rather than a single bad catalog row.
                 group_failures.append(parent_result)
 
         level += 1
@@ -1175,6 +1218,7 @@ def _debug_result_parent_node_ids(results):
 
 
 def successful_leaf_chunks(results):
+    """Return successful debug chunks whose children do not supersede them."""
     parent_node_ids = _debug_result_parent_node_ids(results)
     return [
         result.chunk
@@ -1184,6 +1228,7 @@ def successful_leaf_chunks(results):
 
 
 def unresolved_failed_leaf_results(results):
+    """Return failed leaves that are still wider than one input row."""
     parent_node_ids = _debug_result_parent_node_ids(results)
     unresolved = []
     for result in sort_chunk_results(results):
@@ -1197,6 +1242,7 @@ def unresolved_failed_leaf_results(results):
 
 
 def isolated_failed_row_results(results):
+    """Return failed leaves narrowed all the way down to one input row."""
     parent_node_ids = _debug_result_parent_node_ids(results)
     return [
         result
@@ -1212,6 +1258,8 @@ def salvage_output_chunks(chunks, failures, debug_results):
     completed_parent_chunks = [
         chunk for chunk in chunks if chunk not in failed_chunks and chunk_is_complete(chunk)
     ]
+    # Replace failed parents with successful debug leaves so one isolated bad
+    # row does not discard the rest of that parent's output.
     return sort_output_chunks(completed_parent_chunks + successful_leaf_chunks(debug_results))
 
 
@@ -1234,6 +1282,7 @@ def _csv_columns(path):
 
 
 def output_pair_key_columns(paths):
+    """Choose the most informative object/time key available in Sorcha outputs."""
     for path in paths:
         columns = _csv_columns(path)
         id_column = _first_present(columns, OUTPUT_ID_COLUMNS)
@@ -1291,6 +1340,7 @@ def catalog_row_lookup(catalog_rows):
 
 
 def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
+    """Compare chunk CSV rows against the combined CSV using schema-flexible keys."""
     paths_for_columns = list(source_paths) + [combined_path]
     key_columns, id_column, timestamp_column = output_pair_key_columns(paths_for_columns)
     summary = {
@@ -1367,6 +1417,8 @@ def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None)
         ),
     ]
     for output_name, source_paths, combined_path in output_sets:
+        # Audit detections and ephemerides independently because their column
+        # names and zero-output behavior can diverge.
         summary, missing = audit_output_pairs(source_paths, combined_path, output_name, catalog_rows)
         audit_rows.append(summary)
         if not missing.empty:
@@ -1432,6 +1484,7 @@ def run_sorcha_chunks(
         raise ValueError("--isolate-failing-rows requires a positive debug chunk size")
 
     if chunk_size <= 0:
+        # Preserve the legacy one-shot execution path for small/debug runs.
         orbits_path = WORK_DIR / f"job_{job_name}_orbits.csv"
         physpar_path = WORK_DIR / f"job_{job_name}_physparams.csv"
         out_path = RESULTS_DIR / f"{time[:10]}_job_{job_name}.csv"
@@ -1442,6 +1495,8 @@ def run_sorcha_chunks(
 
     digest = dataframe_digest(orbs, phys)
     if context_digest:
+        # Input rows alone are not enough for resume safety: the same objects
+        # against a different pointing DB or config need a different run dir.
         digest = hashlib.sha256(f"{digest}|{context_digest}".encode()).hexdigest()
     chunks = plan_sorcha_chunks(job_name, time, len(orbs), chunk_size, digest)
     if only_chunks is not None:
@@ -1477,6 +1532,8 @@ def run_sorcha_chunks(
     )
 
     if force_debug_chunking:
+        # Operators can jump directly to debug subchunks for a known-bad parent
+        # range without paying for another full parent chunk attempt.
         print(
             f"  Force debug chunking — {job_name}: selected={len(chunks_to_run)}, "
             f"debug size={debug_failed_chunk_size}, workers={workers}"
@@ -1573,6 +1630,9 @@ def run_sorcha_chunks(
         if only_chunks is None and isolate_failing_rows and debug_results:
             unresolved_failures = unresolved_failed_leaf_results(debug_results)
             if not unresolved_failures:
+                # Once every failed range is either isolated to a row or proven
+                # to be a group interaction, combine all successful leaves and
+                # leave the bad rows described in debug artifacts.
                 chunks_to_combine = salvage_output_chunks(chunks, failures, debug_results)
                 if not chunks_to_combine:
                     raise RuntimeError(
@@ -1605,6 +1665,8 @@ def run_sorcha_chunks(
         raise RuntimeError(f"Sorcha chunk failures for {job_name}: {failure_text}")
 
     if only_chunks is not None:
+        # Selected chunk runs are diagnostic and must not advance incremental
+        # state, since the full job has not necessarily completed.
         print(f"  Completed selected chunks for {job_name}; skipping final combine and state update")
         return False
 
@@ -1710,7 +1772,8 @@ def run_ponder(
     catalog_snapshot_path = write_mpc_catalog_snapshot(object_path, RESULTS_DIR, ts)
     print(f"  Saved MPC catalog snapshot to {catalog_snapshot_path}")
 
-    # load persisted state
+    # Persisted state is scoped by DB path and object mode so runs against a
+    # different pointing database do not reuse old "last_mjd" or orbit hashes.
     state_file, hashes_file = state_files_for_run(db_path, comet)
     state = json.loads(state_file.read_text()) if state_file.exists() else {"last_mjd": 0.0}
     prev_hashes = json.loads(hashes_file.read_text()) if hashes_file.exists() else {}
@@ -1747,6 +1810,8 @@ def run_ponder(
         db_max_mjd=db_last_mjd,
         db_row_count=total_pts,
     )
+    # Unchanged objects only need new pointings, while new/updated objects need
+    # the full DB history. Use separate digests so chunk resume mirrors that scope.
     new_pointings_context_digest = run_context_digest(
         db_path,
         config_path,
