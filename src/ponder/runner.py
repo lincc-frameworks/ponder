@@ -47,14 +47,44 @@ OUTPUT_TIMESTAMP_COLUMNS = [
 ]
 
 
-def first_run_setup(objects, state, db_path):
-    """If this is the first run, initialize state and hashes files."""
-    print("First run — building baseline hashes.")
-    prev_hashes = {obj_id(c): hash_orbit(c) for c in objects}
-    state["last_mjd"] = 0.0
-    HASHES_FILE.write_text(json.dumps(prev_hashes))
-    STATE_FILE.write_text(json.dumps(state))
-    print(f"  {len(prev_hashes)} comets hashed. Last MJD = {state['last_mjd']:.4f}")
+def object_hashes(objects):
+    return {obj_id(obj): hash_orbit(obj) for obj in objects}
+
+
+def _state_path_token(path):
+    stem = Path(path).stem or "pointings"
+    safe = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in stem)
+    return safe[:80] or "pointings"
+
+
+def state_files_for_run(db_path, comet):
+    mode = "comets" if comet else "asteroids"
+    db_path = Path(db_path).expanduser().resolve()
+    digest = hashlib.sha256(f"{db_path}|{mode}".encode()).hexdigest()[:12]
+    stem = f"{_state_path_token(db_path)}_{mode}_{digest}"
+    return Path(f"state_{stem}.json"), Path(f"element_hashes_{stem}.json")
+
+
+def path_fingerprint(path):
+    path = Path(path).expanduser().resolve()
+    try:
+        stat = path.stat()
+        marker = f"{stat.st_size}:{stat.st_mtime_ns}"
+    except FileNotFoundError:
+        marker = "missing"
+    return f"{path}:{marker}"
+
+
+def run_context_digest(db_path, config_path, comet, **metadata):
+    mode = "comets" if comet else "asteroids"
+    parts = [
+        f"mode={mode}",
+        f"db={path_fingerprint(db_path)}",
+        f"config={path_fingerprint(config_path)}",
+    ]
+    for key in sorted(metadata):
+        parts.append(f"{key}={metadata[key]}")
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -269,9 +299,10 @@ def write_mpc_catalog_snapshot(object_path, results_dir, timestamp):
 
     digest = hashlib.sha256()
     source_open = gzip.open if object_path.suffix.lower() == ".gz" else open
-    with source_open(object_path, "rb") as src, gzip.GzipFile(
-        filename=str(tmp_path), mode="wb", mtime=0
-    ) as dst:
+    with (
+        source_open(object_path, "rb") as src,
+        gzip.GzipFile(filename=str(tmp_path), mode="wb", mtime=0) as dst,
+    ):
         for block in iter(lambda: src.read(1024 * 1024), b""):
             digest.update(block)
             dst.write(block)
@@ -378,9 +409,8 @@ def chunk_is_complete(chunk):
     marker = _read_json_file(chunk.done_path)
     output_expected = marker.get("output_exists", True)
     ew_output_expected = marker.get("ew_output_exists", True)
-    return (
-        (not output_expected or chunk.output_path.exists())
-        and (not ew_output_expected or chunk.ew_output_path.exists())
+    return (not output_expected or chunk.output_path.exists()) and (
+        not ew_output_expected or chunk.ew_output_path.exists()
     )
 
 
@@ -515,6 +545,7 @@ def write_chunk_manifest(
     chunk_size,
     digest,
     catalog_snapshot_path=None,
+    context_digest=None,
 ):
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -522,6 +553,7 @@ def write_chunk_manifest(
         "row_count": row_count,
         "chunk_size": chunk_size,
         "digest": digest,
+        "context_digest": context_digest or "",
         "catalog_snapshot_path": "" if catalog_snapshot_path is None else str(catalog_snapshot_path),
         "chunks": [
             {
@@ -1138,9 +1170,7 @@ def sort_output_chunks(chunks):
 
 def _debug_result_parent_node_ids(results):
     return {
-        result.metadata.get("parent_node_id")
-        for result in results
-        if result.metadata.get("parent_node_id")
+        result.metadata.get("parent_node_id") for result in results if result.metadata.get("parent_node_id")
     }
 
 
@@ -1180,9 +1210,7 @@ def isolated_failed_row_results(results):
 def salvage_output_chunks(chunks, failures, debug_results):
     failed_chunks = {result.chunk for result in failures}
     completed_parent_chunks = [
-        chunk
-        for chunk in chunks
-        if chunk not in failed_chunks and chunk_is_complete(chunk)
+        chunk for chunk in chunks if chunk not in failed_chunks and chunk_is_complete(chunk)
     ]
     return sort_output_chunks(completed_parent_chunks + successful_leaf_chunks(debug_results))
 
@@ -1383,6 +1411,7 @@ def run_sorcha_chunks(
     only_chunks=None,
     catalog_rows=None,
     catalog_snapshot_path=None,
+    context_digest=None,
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
@@ -1412,6 +1441,8 @@ def run_sorcha_chunks(
         return
 
     digest = dataframe_digest(orbs, phys)
+    if context_digest:
+        digest = hashlib.sha256(f"{digest}|{context_digest}".encode()).hexdigest()
     chunks = plan_sorcha_chunks(job_name, time, len(orbs), chunk_size, digest)
     if only_chunks is not None:
         known_indices = {chunk.index for chunk in chunks}
@@ -1432,6 +1463,7 @@ def run_sorcha_chunks(
         chunk_size,
         digest,
         catalog_snapshot_path=catalog_snapshot_path,
+        context_digest=context_digest,
     )
     write_chunk_manifest(
         results_manifest_path,
@@ -1441,6 +1473,7 @@ def run_sorcha_chunks(
         chunk_size,
         digest,
         catalog_snapshot_path=catalog_snapshot_path,
+        context_digest=context_digest,
     )
 
     if force_debug_chunking:
@@ -1467,16 +1500,10 @@ def run_sorcha_chunks(
 
     completed = [chunk for chunk in chunks_to_run if resume and chunk_is_complete(chunk)]
     resumed_failures = [
-        chunk
-        for chunk in chunks_to_run
-        if resume and chunk not in completed and chunk.failed_path.exists()
+        chunk for chunk in chunks_to_run if resume and chunk not in completed and chunk.failed_path.exists()
     ]
-    pending = [
-        chunk
-        for chunk in chunks_to_run
-        if chunk not in completed and chunk not in resumed_failures
-    ]
-    final_output = RESULTS_DIR / f"{time[:10]}_job_{job_name}.csv"
+    pending = [chunk for chunk in chunks_to_run if chunk not in completed and chunk not in resumed_failures]
+    final_output = chunks[0].output_path.parent / f"{time[:10]}_job_{job_name}.csv"
     selected_text = ""
     if only_chunks is not None:
         selected_text = f", selected={len(chunks_to_run)}"
@@ -1571,9 +1598,7 @@ def run_sorcha_chunks(
                         f"details in {missing_path}"
                     )
                 else:
-                    print(
-                        "  Output audit — all chunk object/timestamp pairs are present in combined outputs"
-                    )
+                    print("  Output audit — all chunk object/timestamp pairs are present in combined outputs")
                 return True
 
         failure_text = ", ".join(f"chunk {result.chunk.index:05d}: {result.error}" for result in failures)
@@ -1617,6 +1642,7 @@ def run_id_set(
     resume=True,
     only_chunks=None,
     catalog_snapshot_path=None,
+    context_digest=None,
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
@@ -1640,6 +1666,7 @@ def run_id_set(
         only_chunks=only_chunks,
         catalog_rows=catalog_rows,
         catalog_snapshot_path=catalog_snapshot_path,
+        context_digest=context_digest,
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
@@ -1684,8 +1711,9 @@ def run_ponder(
     print(f"  Saved MPC catalog snapshot to {catalog_snapshot_path}")
 
     # load persisted state
-    state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {"last_mjd": 0.0}
-    prev_hashes = json.loads(HASHES_FILE.read_text()) if HASHES_FILE.exists() else {}
+    state_file, hashes_file = state_files_for_run(db_path, comet)
+    state = json.loads(state_file.read_text()) if state_file.exists() else {"last_mjd": 0.0}
+    prev_hashes = json.loads(hashes_file.read_text()) if hashes_file.exists() else {}
 
     objects = annotate_catalog_row_numbers(read_json_catalog(object_path))
     ignore_ids = read_ignore_ids(ignore_objects_path, ignore_object_ids)
@@ -1696,7 +1724,7 @@ def run_ponder(
         print(f"  Orbit filter — kept: {len(objects)}  removed: {unfiltered_count - len(objects)}")
 
     if not prev_hashes:
-        first_run_setup(objects, state, db_path)
+        print("  No baseline object hashes found; treating all objects as new")
 
     print(f"\n[{ts}] Starting cycle")
 
@@ -1708,18 +1736,59 @@ def run_ponder(
 
     new_pts_db = WORK_DIR / "new_pointings.db"
     n_new_pts = extract_new_pointings(db_path, state["last_mjd"], new_pts_db)
+    db_last_mjd = db_max_mjd(db_path)
     total_pts = db_count(db_path)
     print(f"  Pointings — new: {n_new_pts}  total: {total_pts}")
+    full_context_digest = run_context_digest(
+        db_path,
+        config_path,
+        comet,
+        pointing_scope="full",
+        db_max_mjd=db_last_mjd,
+        db_row_count=total_pts,
+    )
+    new_pointings_context_digest = run_context_digest(
+        db_path,
+        config_path,
+        comet,
+        pointing_scope="new",
+        previous_last_mjd=state["last_mjd"],
+        db_max_mjd=db_last_mjd,
+        db_row_count=total_pts,
+    )
 
-    #  -- job unchanged_and_new: new pointings * unchanged + new objects --
-    job_uan_ids = set(unchanged_ids) | set(new_ids)
-    unchanged_and_new_done = run_id_set(
+    if n_new_pts:
+        unchanged_done = run_id_set(
+            objects,
+            unchanged_ids,
+            "unchanged",
+            ts,
+            comet,
+            new_pts_db,
+            config_path,
+            chunk_size,
+            sorcha_workers,
+            timeout=sorcha_timeout,
+            resume=resume_chunks,
+            only_chunks=selected_chunks,
+            catalog_snapshot_path=catalog_snapshot_path,
+            context_digest=new_pointings_context_digest,
+            debug_failed_chunk_size=debug_failed_chunk_size,
+            force_debug_chunking=force_debug_chunking,
+            isolate_failing_rows=isolate_failing_rows,
+        )
+    else:
+        unchanged_done = True
+        if unchanged_ids:
+            print("  [skipping unchanged — no new pointings]")
+
+    new_done = run_id_set(
         objects,
-        job_uan_ids,
-        "unchanged_and_new",
+        new_ids,
+        "new",
         ts,
         comet,
-        new_pts_db,
+        db_path,
         config_path,
         chunk_size,
         sorcha_workers,
@@ -1727,6 +1796,7 @@ def run_ponder(
         resume=resume_chunks,
         only_chunks=selected_chunks,
         catalog_snapshot_path=catalog_snapshot_path,
+        context_digest=full_context_digest,
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
@@ -1746,19 +1816,20 @@ def run_ponder(
         resume=resume_chunks,
         only_chunks=selected_chunks,
         catalog_snapshot_path=catalog_snapshot_path,
+        context_digest=full_context_digest,
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
     )
 
-    if not unchanged_and_new_done or not updated_done:
+    if not unchanged_done or not new_done or not updated_done:
         print("  Partial chunk run requested; state not updated")
         return
 
     # -- persist state for next run --
-    last_mjd = db_max_mjd(db_path)
-    state["last_mjd"] = last_mjd
-    STATE_FILE.write_text(json.dumps(state))
+    state["last_mjd"] = db_last_mjd
+    state_file.write_text(json.dumps(state))
+    hashes_file.write_text(json.dumps(object_hashes(objects)))
 
 
 def main():

@@ -286,18 +286,18 @@ def extract_new_pointings(db_path, last_mjd, out_path):
         out_path.unlink()
     src = sqlite3.connect(db_path)
     dst = sqlite3.connect(out_path)
-    # sql = src.execute(
-    #     "SELECT sql FROM sqlite_master WHERE type='table' AND name='observations'"
-    # )
-    # print(sql.fetchone())
-    # dst.execute(sql.fetchone[0])
-    df = pd.read_sql_query(f"SELECT * FROM observations WHERE observationStartMJD > {last_mjd}", src)
-    num_rows = len(df)
-    print(num_rows, " new pointings")
-    if num_rows > 0:
-        df.to_sql("observations", dst, index=False)
-    src.close()
-    dst.close()
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM observations WHERE observationStartMJD > ?",
+            src,
+            params=(last_mjd,),
+        )
+        num_rows = len(df)
+        print(num_rows, " new pointings")
+        df.to_sql("observations", dst, index=False, if_exists="replace")
+    finally:
+        src.close()
+        dst.close()
     return num_rows
 
 

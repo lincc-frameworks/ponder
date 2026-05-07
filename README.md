@@ -43,6 +43,16 @@ default, recursively isolates remaining failures to single catalog rows, and
 combines the successful parent/debug ranges into the final output while leaving
 the skipped rows in the debug reports.
 
+For incremental runs, Ponder separates the Sorcha jobs by the work they need to
+cover. Unchanged objects run only against newly added pointings, new objects run
+against the full pointing database, and updated objects also run against the full
+pointing database. When there are no new pointings, the unchanged-object job is
+skipped. State and object-hash files are scoped by pointing database and object
+mode, so comet and asteroid runs can share one pointing database without sharing
+the same incremental baseline. Chunked outputs are written inside the
+digest-specific result directory so separate pointing database contexts do not
+overwrite or resume each other's results.
+
 Each run also stores the input MPC catalog as a gzipped JSON snapshot under
 `results/catalogs/` and records that path in each job manifest. Ponder adds a
 `ponder_catalog_row` column to catalog-row reports so row-number references can

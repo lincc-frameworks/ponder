@@ -1,5 +1,7 @@
 import gzip
 import json
+import sqlite3
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -194,7 +196,40 @@ def test_run_sorcha_chunks_resumes_completed_chunks(tmp_path, monkeypatch):
         workers=1,
     )
     assert len(calls) == 2
-    assert (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv").exists()
+    assert next((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv")).exists()
+
+
+def test_run_sorcha_chunks_context_digest_separates_resume_dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(runner, "RESULTS_DIR", tmp_path / "results")
+    calls = []
+
+    def fake_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        calls.append(output.parent.name)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ObjID\nA\n")
+        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID\nA\n")
+
+    monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
+    orbs = pd.DataFrame({"ObjID": ["A"], "a": [1.0]})
+    phys = pd.DataFrame({"ObjID": ["A"], "H_r": [10.0]})
+
+    for context_digest in ["dp1", "rubin"]:
+        runner.run_sorcha_chunks(
+            orbs,
+            phys,
+            "new",
+            "2026-05-05T01:02:03Z",
+            db="pointings.db",
+            config="config.ini",
+            chunk_size=10,
+            workers=1,
+            context_digest=context_digest,
+        )
+
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+    assert len(list((tmp_path / "results").glob("*/2026-05-05_job_new.csv"))) == 2
 
 
 def test_run_sorcha_chunks_can_run_only_selected_chunks(tmp_path, monkeypatch):
@@ -227,7 +262,7 @@ def test_run_sorcha_chunks_can_run_only_selected_chunks(tmp_path, monkeypatch):
     assert completed is False
     assert len(calls) == 1
     assert calls[0].startswith("chunk_00001")
-    assert not (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv").exists()
+    assert not list((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv"))
 
 
 def test_read_ignore_ids_and_filter_objects(tmp_path):
@@ -245,6 +280,163 @@ def test_read_ignore_ids_and_filter_objects(tmp_path):
     kept = runner.filter_ignored_objects(objects, ignore_ids)
 
     assert [obj["Principal_desig"] for obj in kept] == ["A"]
+
+
+def test_extract_new_pointings_creates_empty_observations_table(tmp_path):
+    source_db = tmp_path / "source.db"
+    out_db = tmp_path / "new_pointings.db"
+    with sqlite3.connect(source_db) as con:
+        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
+        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+
+    count = runner.extract_new_pointings(source_db, 10.0, out_db)
+
+    assert count == 0
+    with sqlite3.connect(out_db) as con:
+        assert con.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 0
+
+
+def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_path = tmp_path / "pointings.db"
+    object_path = tmp_path / "objects.json"
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[INPUT]\n")
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
+        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+    state_file, hashes_file = runner.state_files_for_run(db_path, comet=False)
+    state_file.write_text(json.dumps({"last_mjd": 10.0}))
+
+    objects = [
+        {
+            "Principal_desig": "A",
+            "a": 2.0,
+            "e": 0.1,
+            "i": 1.0,
+            "Node": 2.0,
+            "Peri": 3.0,
+            "M": 4.0,
+            "Epoch": 2461000.5,
+            "H": 15.0,
+            "U": 0,
+        }
+    ]
+    object_path.write_text(json.dumps(objects))
+    calls = []
+
+    def fake_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        calls.append(Path(db))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ObjID,fieldMJD_TAI\nA,10\n")
+        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nA,10\n")
+
+    monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
+
+    runner.run_ponder(
+        db_path,
+        object_path,
+        config_path,
+        comet=False,
+        chunk_size=10,
+        sorcha_workers=1,
+    )
+
+    assert calls == [db_path]
+    assert json.loads(hashes_file.read_text()) == runner.object_hashes(runner.read_json_catalog(object_path))
+
+
+def test_run_ponder_skips_unchanged_objects_when_no_new_pointings(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_path = tmp_path / "pointings.db"
+    object_path = tmp_path / "objects.json"
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[INPUT]\n")
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
+        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+
+    objects = [
+        {
+            "Principal_desig": "A",
+            "a": 2.0,
+            "e": 0.1,
+            "i": 1.0,
+            "Node": 2.0,
+            "Peri": 3.0,
+            "M": 4.0,
+            "Epoch": 2461000.5,
+            "H": 15.0,
+            "U": 0,
+        }
+    ]
+    object_path.write_text(json.dumps(objects))
+    state_file, hashes_file = runner.state_files_for_run(db_path, comet=False)
+    state_file.write_text(json.dumps({"last_mjd": 10.0}))
+    hashes_file.write_text(json.dumps(runner.object_hashes(objects)))
+
+    def fail_if_called(orbits, physparams, output, db, config, timeout=None):
+        raise AssertionError("unchanged objects should not run without new pointings")
+
+    monkeypatch.setattr(runner, "run_sorcha", fail_if_called)
+
+    runner.run_ponder(
+        db_path,
+        object_path,
+        config_path,
+        comet=False,
+        chunk_size=10,
+        sorcha_workers=1,
+    )
+
+
+def test_run_ponder_ignores_legacy_global_state_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_path = tmp_path / "pointings.db"
+    object_path = tmp_path / "objects.json"
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[INPUT]\n")
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
+        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+
+    objects = [
+        {
+            "Principal_desig": "A",
+            "a": 2.0,
+            "e": 0.1,
+            "i": 1.0,
+            "Node": 2.0,
+            "Peri": 3.0,
+            "M": 4.0,
+            "Epoch": 2461000.5,
+            "H": 15.0,
+            "U": 0,
+        }
+    ]
+    object_path.write_text(json.dumps(objects))
+    runner.STATE_FILE.write_text(json.dumps({"last_mjd": 10.0}))
+    runner.HASHES_FILE.write_text(json.dumps(runner.object_hashes(objects)))
+    calls = []
+
+    def fake_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        calls.append(Path(db))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ObjID,fieldMJD_TAI\nA,10\n")
+        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nA,10\n")
+
+    monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
+
+    runner.run_ponder(
+        db_path,
+        object_path,
+        config_path,
+        comet=False,
+        chunk_size=10,
+        sorcha_workers=1,
+    )
+
+    assert calls == [db_path]
 
 
 def test_failed_chunks_write_summary_and_catalog_rows(tmp_path, monkeypatch):
@@ -376,7 +568,7 @@ def test_failed_chunks_default_to_isolation_and_salvage_outputs(tmp_path, monkey
     )
 
     assert completed is True
-    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
+    output = next((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv"))
     final_rows = pd.read_csv(output)
     assert final_rows["ObjID"].tolist() == ["A", "B", "C"]
 
@@ -453,7 +645,7 @@ def test_rerun_resumes_parent_failures_into_debug_salvage(tmp_path, monkeypatch)
     assert completed is True
     assert not any(name.startswith("chunk_00001_rows") for name in second_run_calls)
     assert any("debug" in name for name in second_run_calls)
-    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
+    output = next((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv"))
     assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B", "C"]
 
 
@@ -494,7 +686,7 @@ def test_salvage_skips_successful_debug_ranges_without_outputs(tmp_path, monkeyp
     )
 
     assert completed is True
-    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
+    output = next((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv"))
     assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B"]
 
     debug_dir = next((tmp_path / "results").glob("*/debug"))
