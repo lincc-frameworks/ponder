@@ -43,6 +43,13 @@ default, recursively isolates remaining failures to single catalog rows, and
 combines the successful parent/debug ranges into the final output while leaving
 the skipped rows in the debug reports.
 
+Per-chunk work files and Sorcha outputs live under `work/chunk_runs/` and
+`results/chunk_runs/` so the top-level `results/` directory stays readable.
+Ponder keeps the authoritative combined files in the digest-scoped run directory
+and also exposes hard links, or copies if hard links are not available, at
+`results/<date>_job_<job>.csv` and `results/<date>_job_<job>_ew.csv` when no
+conflicting top-level file already exists.
+
 For incremental runs, Ponder separates the Sorcha jobs by the work they need to
 cover. Unchanged objects run only against newly added pointings, new objects run
 against the full pointing database, and updated objects also run against the full
@@ -80,14 +87,14 @@ ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-
 When chunks fail, Ponder writes a failure summary and the associated original
 catalog rows under the chunk result directory:
 
-- `results/<date>_job_<job>_<digest>/failures.csv`
-- `results/<date>_job_<job>_<digest>/failed_catalog_rows.csv`
+- `results/chunk_runs/<date>_job_<job>_<digest>/failures.csv`
+- `results/chunk_runs/<date>_job_<job>_<digest>/failed_catalog_rows.csv`
 
 When chunks finish and are combined, Ponder audits the per-chunk Sorcha outputs
 against the combined result files by object ID and timestamp, then writes:
 
-- `results/<date>_job_<job>_<digest>/output_audit.csv`
-- `results/<date>_job_<job>_<digest>/missing_output_pairs.csv`
+- `results/chunk_runs/<date>_job_<job>_<digest>/output_audit.csv`
+- `results/chunk_runs/<date>_job_<job>_<digest>/missing_output_pairs.csv`
 
 If any chunk output object/timestamp pairs are absent from the combined
 detection or ephemeris files, `missing_output_pairs.csv` lists the object,
@@ -100,7 +107,7 @@ known bad objects on a later run, pass either a file or repeated object IDs:
 
 ```bash
 ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-2026.json --db from_rubin_dp1.db \
-  --ignore-objects results/<date>_job_<job>_<digest>/debug/failing_rows.csv
+  --ignore-objects results/chunk_runs/<date>_job_<job>_<digest>/debug/failing_rows.csv
 ```
 
 ```bash
@@ -118,12 +125,25 @@ ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-
 
 Debug subchunks get their own progress bar and write:
 
-- `results/<date>_job_<job>_<digest>/debug/subchunk_debug_report.csv`
-- `results/<date>_job_<job>_<digest>/debug/failed_subchunk_catalog_rows.csv`
+- `results/chunk_runs/<date>_job_<job>_<digest>/debug/subchunk_debug_report.csv`
+- `results/chunk_runs/<date>_job_<job>_<digest>/debug/failed_subchunk_catalog_rows.csv`
 
 If Sorcha completes a debug or isolation range but emits no output CSV because
 there are no rows to write, Ponder treats that as a successful zero-output range
 and skips the missing file during final combine.
+
+To tidy an older run directory that predates the `chunk_runs/` layout, run a dry
+run first and then apply it:
+
+```bash
+ponder-consolidate-chunks /path/to/pointing_dbs
+ponder-consolidate-chunks /path/to/pointing_dbs --apply
+```
+
+The maintenance command consolidates complete manifest-backed runs, exposes
+audited combined files in top-level `results/`, moves digest-scoped result and
+work directories under `chunk_runs/`, and files old top-level Sorcha logs under
+`results/logs/`. It does not delete chunk artifacts.
 
 By default, Ponder keeps subdividing failed debug ranges until it identifies
 individual failing rows. If you already know which parent chunks failed, add

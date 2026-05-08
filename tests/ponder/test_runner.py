@@ -27,6 +27,8 @@ def test_plan_sorcha_chunks_uses_digest_and_row_ranges(tmp_path, monkeypatch):
         (2, 4, 5),
     ]
     assert "2026-05-05_job_unchanged_and_new_abcdef123456" in str(chunks[0].orbits_path)
+    assert chunks[0].orbits_path.parent.parent.name == "chunk_runs"
+    assert chunks[0].output_path.parent.parent.name == "chunk_runs"
     assert chunks[1].output_path.name == "chunk_00001_rows_0000002_0000003.csv"
     assert chunks[1].ew_output_path.name == "chunk_00001_rows_0000002_0000003_ew.csv"
 
@@ -196,7 +198,8 @@ def test_run_sorcha_chunks_resumes_completed_chunks(tmp_path, monkeypatch):
         workers=1,
     )
     assert len(calls) == 2
-    assert next((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv")).exists()
+    assert (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv").exists()
+    assert next((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_unchanged_and_new.csv")).exists()
 
 
 def test_run_sorcha_chunks_context_digest_separates_resume_dirs(tmp_path, monkeypatch):
@@ -229,7 +232,8 @@ def test_run_sorcha_chunks_context_digest_separates_resume_dirs(tmp_path, monkey
 
     assert len(calls) == 2
     assert len(set(calls)) == 2
-    assert len(list((tmp_path / "results").glob("*/2026-05-05_job_new.csv"))) == 2
+    assert len(list((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_new.csv"))) == 2
+    assert (tmp_path / "results" / "2026-05-05_job_new.csv").exists()
 
 
 def test_run_sorcha_chunks_can_run_only_selected_chunks(tmp_path, monkeypatch):
@@ -262,7 +266,7 @@ def test_run_sorcha_chunks_can_run_only_selected_chunks(tmp_path, monkeypatch):
     assert completed is False
     assert len(calls) == 1
     assert calls[0].startswith("chunk_00001")
-    assert not list((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv"))
+    assert not (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv").exists()
 
 
 def test_read_ignore_ids_and_filter_objects(tmp_path):
@@ -476,8 +480,8 @@ def test_failed_chunks_write_summary_and_catalog_rows(tmp_path, monkeypatch):
             isolate_failing_rows=False,
         )
 
-    failure_paths = list((tmp_path / "results").glob("*/failures.csv"))
-    catalog_paths = list((tmp_path / "results").glob("*/failed_catalog_rows.csv"))
+    failure_paths = list((tmp_path / "results").glob("chunk_runs/*/failures.csv"))
+    catalog_paths = list((tmp_path / "results").glob("chunk_runs/*/failed_catalog_rows.csv"))
     assert len(failure_paths) == 1
     assert len(catalog_paths) == 1
 
@@ -521,8 +525,8 @@ def test_failed_chunks_can_run_debug_subchunks(tmp_path, monkeypatch):
             isolate_failing_rows=False,
         )
 
-    report_paths = list((tmp_path / "results").glob("*/debug/subchunk_debug_report.csv"))
-    catalog_paths = list((tmp_path / "results").glob("*/debug/failed_subchunk_catalog_rows.csv"))
+    report_paths = list((tmp_path / "results").glob("chunk_runs/*/debug/subchunk_debug_report.csv"))
+    catalog_paths = list((tmp_path / "results").glob("chunk_runs/*/debug/failed_subchunk_catalog_rows.csv"))
     assert len(report_paths) == 1
     assert len(catalog_paths) == 1
 
@@ -568,16 +572,16 @@ def test_failed_chunks_default_to_isolation_and_salvage_outputs(tmp_path, monkey
     )
 
     assert completed is True
-    output = next((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv"))
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
     final_rows = pd.read_csv(output)
     assert final_rows["ObjID"].tolist() == ["A", "B", "C"]
 
-    debug_dir = next((tmp_path / "results").glob("*/debug"))
+    debug_dir = next((tmp_path / "results").glob("chunk_runs/*/debug"))
     failing_rows = pd.read_csv(debug_dir / "failing_rows.csv")
     assert failing_rows["Principal_desig"].tolist() == ["D"]
     assert failing_rows["failure_row_count"].tolist() == [1]
 
-    audit_path = next((tmp_path / "results").glob("*/output_audit.csv"))
+    audit_path = next((tmp_path / "results").glob("chunk_runs/*/output_audit.csv"))
     audit = pd.read_csv(audit_path)
     assert audit["status"].tolist() == ["ok", "ok"]
 
@@ -645,7 +649,7 @@ def test_rerun_resumes_parent_failures_into_debug_salvage(tmp_path, monkeypatch)
     assert completed is True
     assert not any(name.startswith("chunk_00001_rows") for name in second_run_calls)
     assert any("debug" in name for name in second_run_calls)
-    output = next((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv"))
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
     assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B", "C"]
 
 
@@ -686,10 +690,10 @@ def test_salvage_skips_successful_debug_ranges_without_outputs(tmp_path, monkeyp
     )
 
     assert completed is True
-    output = next((tmp_path / "results").glob("*/2026-05-05_job_unchanged_and_new.csv"))
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
     assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B"]
 
-    debug_dir = next((tmp_path / "results").glob("*/debug"))
+    debug_dir = next((tmp_path / "results").glob("chunk_runs/*/debug"))
     zero_output_done = debug_dir / "chunk_00001_debug_0000_rows_0000002_0000002.done"
     assert json.loads(zero_output_done.read_text())["output_exists"] is False
     assert runner.chunk_is_complete(
@@ -795,7 +799,7 @@ def test_isolate_failing_rows_finds_single_bad_row(tmp_path, monkeypatch):
         isolate_failing_rows=True,
     )
 
-    debug_dir = next((tmp_path / "results").glob("*/debug"))
+    debug_dir = next((tmp_path / "results").glob("chunk_runs/*/debug"))
     isolation = pd.read_csv(debug_dir / "isolation_report.csv")
     failing_rows = pd.read_csv(debug_dir / "failing_rows.csv")
     timing = pd.read_csv(debug_dir / "debug_timing_summary.csv")
@@ -871,7 +875,7 @@ def test_isolate_failing_rows_resumes_failed_debug_ranges(tmp_path, monkeypatch)
         isolate_failing_rows=True,
     )
 
-    debug_dir = next((tmp_path / "results").glob("*/debug"))
+    debug_dir = next((tmp_path / "results").glob("chunk_runs/*/debug"))
     failing_rows = pd.read_csv(debug_dir / "failing_rows.csv")
     assert failing_rows["Principal_desig"].tolist() == ["C"]
     assert any("isolate_l02" in name for name in second_run_calls)
@@ -910,7 +914,7 @@ def test_isolate_failing_rows_reports_multiple_bad_rows(tmp_path, monkeypatch):
         isolate_failing_rows=True,
     )
 
-    debug_dir = next((tmp_path / "results").glob("*/debug"))
+    debug_dir = next((tmp_path / "results").glob("chunk_runs/*/debug"))
     failing_rows = pd.read_csv(debug_dir / "failing_rows.csv")
     assert failing_rows["Principal_desig"].tolist() == ["C", "D"]
 
@@ -948,7 +952,7 @@ def test_isolate_failing_rows_reports_group_only_failures(tmp_path, monkeypatch)
         isolate_failing_rows=True,
     )
 
-    debug_dir = next((tmp_path / "results").glob("*/debug"))
+    debug_dir = next((tmp_path / "results").glob("chunk_runs/*/debug"))
     group_failures = pd.read_csv(debug_dir / "group_failures.csv")
     group_catalog_rows = pd.read_csv(debug_dir / "group_failure_catalog_rows.csv")
     failing_rows = pd.read_csv(debug_dir / "failing_rows.csv")

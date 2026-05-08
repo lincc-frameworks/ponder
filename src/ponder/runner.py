@@ -20,6 +20,7 @@ STATE_FILE = Path("state.json")
 HASHES_FILE = Path("element_hashes.json")
 WORK_DIR = Path("work")
 RESULTS_DIR = Path("results")
+CHUNK_RUNS_DIRNAME = "chunk_runs"
 DEFAULT_CHUNK_SIZE = 5000
 DEFAULT_SORCHA_WORKERS = 1
 DEFAULT_DEBUG_FAILED_CHUNK_SIZE = 250
@@ -371,10 +372,10 @@ def parse_chunk_indices(spec):
 def plan_sorcha_chunks(job_name, time, row_count, chunk_size, digest):
     base_stem = f"{time[:10]}_job_{job_name}"
     run_stem = f"{base_stem}_{digest[:12]}"
-    # Include the digest in both work and result paths so resume markers from a
-    # previous DB/config/input combination cannot satisfy a different run.
-    work_dir = WORK_DIR / run_stem
-    results_dir = RESULTS_DIR / run_stem
+    # Keep the noisy per-chunk files below a dedicated subfolder, while the
+    # digest still scopes resume markers to the DB/config/input combination.
+    work_dir = WORK_DIR / CHUNK_RUNS_DIRNAME / run_stem
+    results_dir = RESULTS_DIR / CHUNK_RUNS_DIRNAME / run_stem
     chunks = []
 
     for index, row_start in enumerate(range(0, row_count, chunk_size)):
@@ -1199,6 +1200,48 @@ def combine_chunk_outputs(chunks, final_output):
     )
 
 
+def _hardlink_if_available(src, dst):
+    """Expose a large combined output without duplicating it when possible."""
+    src = Path(src)
+    dst = Path(dst)
+    if not src.exists():
+        return "missing"
+    if dst.exists():
+        try:
+            return "already_visible" if src.samefile(dst) else "conflict"
+        except FileNotFoundError:
+            return "missing"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)
+        return "linked"
+    except OSError:
+        # Hard links are cheap on local disks, but Dropbox/cloud-backed folders
+        # can refuse them. Fall back to a copy so the visible combined output is
+        # still present for users and follow-up tooling.
+        import shutil
+
+        shutil.copy2(src, dst)
+        return "copied"
+
+
+def promote_combined_outputs(final_output, results_dir=None):
+    """Place top-level links/copies to scoped combined Sorcha outputs."""
+    final_output = Path(final_output)
+    if results_dir is None:
+        results_dir = RESULTS_DIR
+    results_dir = Path(results_dir)
+    visible = results_dir / final_output.name
+    visible_ew = results_dir / f"{final_output.stem}_ew.csv"
+    scoped_ew = final_output.with_name(f"{final_output.stem}_ew.csv")
+
+    statuses = {
+        "detections": _hardlink_if_available(final_output, visible),
+        "ephemeris": _hardlink_if_available(scoped_ew, visible_ew),
+    }
+    return visible, visible_ew, statuses
+
+
 def sort_output_chunks(chunks):
     return sorted(
         chunks,
@@ -1659,6 +1702,11 @@ def run_sorcha_chunks(
                     )
                 else:
                     print("  Output audit — all chunk object/timestamp pairs are present in combined outputs")
+                visible, visible_ew, statuses = promote_combined_outputs(final_output)
+                print(
+                    f"  Visible combined outputs — detections: {statuses['detections']} {visible}; "
+                    f"ephemeris: {statuses['ephemeris']} {visible_ew}"
+                )
                 return True
 
         failure_text = ", ".join(f"chunk {result.chunk.index:05d}: {result.error}" for result in failures)
@@ -1687,6 +1735,11 @@ def run_sorcha_chunks(
         print(f"  Output audit — missing {missing_rows} chunk output rows; details in {missing_path}")
     else:
         print(f"  Output audit — all chunk object/timestamp pairs are present in combined outputs")
+    visible, visible_ew, statuses = promote_combined_outputs(final_output)
+    print(
+        f"  Visible combined outputs — detections: {statuses['detections']} {visible}; "
+        f"ephemeris: {statuses['ephemeris']} {visible_ew}"
+    )
     return True
 
 
