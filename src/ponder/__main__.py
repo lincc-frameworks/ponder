@@ -27,6 +27,12 @@ def main():
     if not orbit_path:
         print("Error: Must provide --orbits or --download_orbits")
         return
+    if args.db is None:
+        if args.download_orbits:
+            print(f"No database supplied; downloaded orbits to {orbit_path}. Skipping Ponder analysis.")
+        else:
+            print("Error: Must provide --db to run Ponder analysis")
+        return
     if args.comet:
         print("Running comet analysis")
     else:
