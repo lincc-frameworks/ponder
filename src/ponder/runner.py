@@ -1951,6 +1951,7 @@ def run_ponder(
 
 
 def main():
+    """Compatibility wrapper for generated console scripts."""
     from .__main__ import main as cli_main
 
     return cli_main()
