@@ -1,5 +1,6 @@
 import gzip
 import hashlib
+import re
 import sqlite3
 
 import numpy as np
@@ -24,6 +25,9 @@ ORBIT_FIELDS = [
 
 MPCORB_URL = "https://www.minorplanetcenter.net/Extended_Files/mpcorb_extended.json.gz"
 MPCCOM_URL = "https://www.minorplanetcenter.net/Extended_Files/allcometels.json.gz"
+MPCORB_SEMIMAJOR_AXIS_LIMIT_AU = 30.0
+MPCORB_UNCERTAINTY_CODE_LIMIT = 6
+MPCORB_OBSERVATION_ARC_LIMIT_DAYS = 3.0
 
 
 # -- comet diff helpers --
@@ -64,6 +68,87 @@ def diff_objects(objects, prev_hashes):
     return new, updated, unchanged
 
 
+# -- catalog filters --
+
+
+def _is_missing(value):
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == "" or value.strip().lower() == "nan"
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _float_or_none(value):
+    if _is_missing(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_arc_years(obj):
+    arc_years = obj.get("Arc_years")
+    if not _is_missing(arc_years):
+        return True
+
+    arc_length = obj.get("Arc_length")
+    if _is_missing(arc_length):
+        return False
+
+    # MPCORB sometimes records long arcs as a year range in Arc_length instead
+    # of populating Arc_years; treat that as a long-enough observation history.
+    return bool(re.fullmatch(r"\d{4}\s*-\s*\d{4}", str(arc_length).strip()))
+
+
+def _arc_length_days(obj):
+    arc_length = obj.get("Arc_length")
+    if _is_missing(arc_length):
+        return None
+
+    if isinstance(arc_length, str):
+        # Accept values like "2 days" while still rejecting year ranges, which
+        # are handled by _has_arc_years before day-length filtering.
+        match = re.search(r"\d+(?:\.\d+)?", arc_length)
+        if not match:
+            return None
+        return float(match.group(0))
+
+    return _float_or_none(arc_length)
+
+
+def mpcorb_observation_arc_at_least(obj, minimum_days=MPCORB_OBSERVATION_ARC_LIMIT_DAYS):
+    if _has_arc_years(obj):
+        return True
+
+    days = _arc_length_days(obj)
+    return days is not None and days >= minimum_days
+
+
+def keep_mpcorb_object(obj):
+    # Keep objects that are either distant, well
+    # constrained, or observed over enough time to be worth a Sorcha run.
+    semimajor_axis = _float_or_none(obj.get("a"))
+    if semimajor_axis is not None and semimajor_axis > MPCORB_SEMIMAJOR_AXIS_LIMIT_AU:
+        return True
+
+    uncertainty_code = _float_or_none(obj.get("U"))
+    if uncertainty_code is not None and uncertainty_code <= MPCORB_UNCERTAINTY_CODE_LIMIT:
+        return True
+
+    return mpcorb_observation_arc_at_least(obj)
+
+
+def filter_orbit_objects(objects, comet=False):
+    if comet:
+        return list(objects)
+    return [obj for obj in objects if keep_mpcorb_object(obj)]
+
+
 def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
     df = pd.DataFrame(mpcorb_json)
 
@@ -81,14 +166,14 @@ def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
             "M",
             "Epoch",
         ]
-    ]
+    ].copy()
 
     phys = df[
         [
             "Principal_desig",
             "H",
         ]
-    ]
+    ].copy()
 
     orbs["Epoch"] = orbs["Epoch"] - 2400000.5
     orbs["FORMAT"] = "KEP"
@@ -207,18 +292,18 @@ def extract_new_pointings(db_path, last_mjd, out_path):
         out_path.unlink()
     src = sqlite3.connect(db_path)
     dst = sqlite3.connect(out_path)
-    # sql = src.execute(
-    #     "SELECT sql FROM sqlite_master WHERE type='table' AND name='observations'"
-    # )
-    # print(sql.fetchone())
-    # dst.execute(sql.fetchone[0])
-    df = pd.read_sql_query(f"SELECT * FROM observations WHERE observationStartMJD > {last_mjd}", src)
-    num_rows = len(df)
-    print(num_rows, " new pointings")
-    if num_rows > 0:
-        df.to_sql("observations", dst, index=False)
-    src.close()
-    dst.close()
+    try:
+        df = pd.read_sql_query(
+            "SELECT * FROM observations WHERE observationStartMJD > ?",
+            src,
+            params=(last_mjd,),
+        )
+        num_rows = len(df)
+        print(num_rows, " new pointings")
+        df.to_sql("observations", dst, index=False, if_exists="replace")
+    finally:
+        src.close()
+        dst.close()
     return num_rows
 
 
