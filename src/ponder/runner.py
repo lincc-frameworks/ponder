@@ -1176,20 +1176,14 @@ def run_failing_row_isolation(
 
 def combine_csv_files(input_paths, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as out:
-        wrote_header = False
-        for input_path in input_paths:
-            if not input_path.exists():
-                continue
-            with open(input_path) as src:
-                header = src.readline()
-                if not header:
-                    continue
-                if not wrote_header:
-                    out.write(header)
-                    wrote_header = True
-                for line in src:
-                    out.write(line)
+    super_df = []
+    for input_path in input_paths:
+        df = pd.read_csv(input_path)
+        super_df.append(df)
+
+    super_df = pd.concat(super_df, ignore_index=True)
+    super_df.sort_values(by="fieldMJD_TAI", inplace=True)
+    super_df.to_parquet(output_path, index=False)
 
 
 def combine_chunk_outputs(chunks, final_output):
@@ -1603,7 +1597,7 @@ def run_sorcha_chunks(
         chunk for chunk in chunks_to_run if resume and chunk not in completed and chunk.failed_path.exists()
     ]
     pending = [chunk for chunk in chunks_to_run if chunk not in completed and chunk not in resumed_failures]
-    final_output = chunks[0].output_path.parent / f"{time[:10]}_job_{job_name}.csv"
+    final_output = chunks[0].output_path.parent / f"{time[:10]}_job_{job_name}.parquet"
     selected_text = ""
     if only_chunks is not None:
         selected_text = f", selected={len(chunks_to_run)}"
