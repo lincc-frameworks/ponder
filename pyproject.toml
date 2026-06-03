@@ -67,3 +67,4 @@ omit=["src/ponder/_version.py"]
 [project.scripts]
 ponder = "ponder.__main__:main"
 ponder-consolidate-chunks = "ponder.chunk_cleanup:main"
+ponder-exposures-exporter = "ponder_tools.exposures_exporter:main"
