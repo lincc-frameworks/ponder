@@ -131,7 +131,7 @@ def test_audit_combined_outputs_reports_missing_object_timestamps(tmp_path):
 
     # final_output = tmp_path / "results" / "2026-05-05_job_test.parquet"
     # final_output.write_text("ObjID,fieldMJD_TAI,value\nA,1,x\nB,2,y\n")
-    
+
     # final_output.with_name(f"{final_output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nA,1\nB,2\n")
     # catalog_rows = pd.DataFrame(
     #     {
@@ -142,14 +142,14 @@ def test_audit_combined_outputs_reports_missing_object_timestamps(tmp_path):
 
     final_output = tmp_path / "results" / "2026-05-05_job_test.parquet"
     final_output.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2], "value": ["x", "y"]}
-    ).to_parquet(final_output, index=False)
-    
-    pd.DataFrame(
-        {"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2]}
-    ).to_parquet(final_output.with_name(f"{final_output.stem}_ew.parquet"), index=False)
-    
+    pd.DataFrame({"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2], "value": ["x", "y"]}).to_parquet(
+        final_output, index=False
+    )
+
+    pd.DataFrame({"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2]}).to_parquet(
+        final_output.with_name(f"{final_output.stem}_ew.parquet"), index=False
+    )
+
     catalog_rows = pd.DataFrame(
         {
             "Principal_desig": ["A", "B"],
@@ -284,7 +284,7 @@ def test_run_sorcha_chunks_can_run_only_selected_chunks(tmp_path, monkeypatch):
     assert completed is False
     assert len(calls) == 1
     assert calls[0].startswith("chunk_00001")
-    assert not (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv").exists()
+    assert not (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet").exists()
 
 
 def test_read_ignore_ids_and_filter_objects(tmp_path):
@@ -709,8 +709,8 @@ def test_salvage_skips_successful_debug_ranges_without_outputs(tmp_path, monkeyp
     )
 
     assert completed is True
-    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
-    assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B"]
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet"
+    assert pd.read_parquet(output)["ObjID"].tolist() == ["A", "B"]
 
     debug_dir = next((tmp_path / "results").glob("chunk_runs/*/debug"))
     zero_output_done = debug_dir / "chunk_00001_debug_0000_rows_0000002_0000002.done"
