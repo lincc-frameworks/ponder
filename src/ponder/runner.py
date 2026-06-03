@@ -1189,11 +1189,12 @@ def combine_csv_to_parquet(input_paths, output_path):
     if not super_df:
         # If no dataframes were collected, create an empty one
         super_df = [pd.DataFrame()]
-    
+
     super_df = pd.concat(super_df, ignore_index=True)
     if "fieldMJD_TAI" in super_df.columns:
         super_df.sort_values(by="fieldMJD_TAI", inplace=True)
     super_df.to_parquet(output_path, index=False)
+
 
 def combine_csv_files(input_paths, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
