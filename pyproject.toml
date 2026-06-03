@@ -21,6 +21,7 @@ dependencies = [
     "pandas < 3.0",
     "sorcha",
     "tqdm",
+    "pyarrow",
 ]
 
 [project.urls]
