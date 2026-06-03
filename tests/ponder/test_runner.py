@@ -129,9 +129,27 @@ def test_audit_combined_outputs_reports_missing_object_timestamps(tmp_path):
     chunk.output_path.write_text("ObjID,fieldMJD_TAI,value\nA,1,x\nB,2,y\nB,2,z\n")
     chunk.ew_output_path.write_text("ObjID,fieldMJD_TAI\nA,1\nB,2\n")
 
-    final_output = tmp_path / "results" / "2026-05-05_job_test.csv"
-    final_output.write_text("ObjID,fieldMJD_TAI,value\nA,1,x\nB,2,y\n")
-    final_output.with_name(f"{final_output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nA,1\nB,2\n")
+    # final_output = tmp_path / "results" / "2026-05-05_job_test.parquet"
+    # final_output.write_text("ObjID,fieldMJD_TAI,value\nA,1,x\nB,2,y\n")
+    
+    # final_output.with_name(f"{final_output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nA,1\nB,2\n")
+    # catalog_rows = pd.DataFrame(
+    #     {
+    #         "Principal_desig": ["A", "B"],
+    #         runner.CATALOG_ROW_COLUMN: [10, 11],
+    #     }
+    # )
+
+    final_output = tmp_path / "results" / "2026-05-05_job_test.parquet"
+    final_output.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2], "value": ["x", "y"]}
+    ).to_parquet(final_output, index=False)
+    
+    pd.DataFrame(
+        {"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2]}
+    ).to_parquet(final_output.with_name(f"{final_output.stem}_ew.parquet"), index=False)
+    
     catalog_rows = pd.DataFrame(
         {
             "Principal_desig": ["A", "B"],
@@ -169,7 +187,7 @@ def test_run_sorcha_chunks_resumes_completed_chunks(tmp_path, monkeypatch):
         calls.append(output.name)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ObjID\nA\n")
-        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID\nA\n")
+        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID\nA\nfieldMJD_TAI\n")
 
     monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
     orbs = pd.DataFrame({"ObjID": ["A", "B", "C"], "a": [1.0, 2.0, 3.0]})
@@ -198,8 +216,8 @@ def test_run_sorcha_chunks_resumes_completed_chunks(tmp_path, monkeypatch):
         workers=1,
     )
     assert len(calls) == 2
-    assert (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv").exists()
-    assert next((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_unchanged_and_new.csv")).exists()
+    assert (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet").exists()
+    assert next((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_unchanged_and_new.parquet")).exists()
 
 
 def test_run_sorcha_chunks_context_digest_separates_resume_dirs(tmp_path, monkeypatch):
@@ -232,8 +250,8 @@ def test_run_sorcha_chunks_context_digest_separates_resume_dirs(tmp_path, monkey
 
     assert len(calls) == 2
     assert len(set(calls)) == 2
-    assert len(list((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_new.csv"))) == 2
-    assert (tmp_path / "results" / "2026-05-05_job_new.csv").exists()
+    assert len(list((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_new.parquet"))) == 2
+    assert (tmp_path / "results" / "2026-05-05_job_new.parquet").exists()
 
 
 def test_run_sorcha_chunks_can_run_only_selected_chunks(tmp_path, monkeypatch):
@@ -572,8 +590,8 @@ def test_failed_chunks_default_to_isolation_and_salvage_outputs(tmp_path, monkey
     )
 
     assert completed is True
-    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
-    final_rows = pd.read_csv(output)
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet"
+    final_rows = pd.read_parquet(output)
     assert final_rows["ObjID"].tolist() == ["A", "B", "C"]
 
     debug_dir = next((tmp_path / "results").glob("chunk_runs/*/debug"))
@@ -582,6 +600,7 @@ def test_failed_chunks_default_to_isolation_and_salvage_outputs(tmp_path, monkey
     assert failing_rows["failure_row_count"].tolist() == [1]
 
     audit_path = next((tmp_path / "results").glob("chunk_runs/*/output_audit.csv"))
+    print(audit_path)
     audit = pd.read_csv(audit_path)
     assert audit["status"].tolist() == ["ok", "ok"]
 
@@ -649,8 +668,8 @@ def test_rerun_resumes_parent_failures_into_debug_salvage(tmp_path, monkeypatch)
     assert completed is True
     assert not any(name.startswith("chunk_00001_rows") for name in second_run_calls)
     assert any("debug" in name for name in second_run_calls)
-    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.csv"
-    assert pd.read_csv(output)["ObjID"].tolist() == ["A", "B", "C"]
+    output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet"
+    assert pd.read_parquet(output)["ObjID"].tolist() == ["A", "B", "C"]
 
 
 def test_salvage_skips_successful_debug_ranges_without_outputs(tmp_path, monkeypatch):

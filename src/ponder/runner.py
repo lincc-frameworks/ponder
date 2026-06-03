@@ -1174,23 +1174,50 @@ def run_failing_row_isolation(
     return all_results
 
 
-def combine_csv_files(input_paths, output_path):
+def combine_csv_to_parquet(input_paths, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     super_df = []
     for input_path in input_paths:
-        df = pd.read_csv(input_path)
+        if not input_path.exists():
+            continue
+        if input_path.suffix == ".parquet":
+            df = pd.read_parquet(input_path)
+        else:
+            df = pd.read_csv(input_path)
         super_df.append(df)
 
+    if not super_df:
+        # If no dataframes were collected, create an empty one
+        super_df = [pd.DataFrame()]
+    
     super_df = pd.concat(super_df, ignore_index=True)
-    super_df.sort_values(by="fieldMJD_TAI", inplace=True)
+    if "fieldMJD_TAI" in super_df.columns:
+        super_df.sort_values(by="fieldMJD_TAI", inplace=True)
     super_df.to_parquet(output_path, index=False)
+
+def combine_csv_files(input_paths, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as out:
+        wrote_header = False
+        for input_path in input_paths:
+            if not input_path.exists():
+                continue
+            with open(input_path) as src:
+                header = src.readline()
+                if not header:
+                    continue
+                if not wrote_header:
+                    out.write(header)
+                    wrote_header = True
+                for line in src:
+                    out.write(line)
 
 
 def combine_chunk_outputs(chunks, final_output):
-    combine_csv_files([chunk.output_path for chunk in chunks], final_output)
-    combine_csv_files(
+    combine_csv_to_parquet([chunk.output_path for chunk in chunks], final_output)
+    combine_csv_to_parquet(
         [chunk.ew_output_path for chunk in chunks],
-        final_output.with_name(f"{final_output.stem}_ew.csv"),
+        final_output.with_name(f"{final_output.stem}_ew.parquet"),
     )
 
 
@@ -1226,8 +1253,8 @@ def promote_combined_outputs(final_output, results_dir=None):
         results_dir = RESULTS_DIR
     results_dir = Path(results_dir)
     visible = results_dir / final_output.name
-    visible_ew = results_dir / f"{final_output.stem}_ew.csv"
-    scoped_ew = final_output.with_name(f"{final_output.stem}_ew.csv")
+    visible_ew = results_dir / f"{final_output.stem}_ew.parquet"
+    scoped_ew = final_output.with_name(f"{final_output.stem}_ew.parquet")
 
     statuses = {
         "detections": _hardlink_if_available(final_output, visible),
@@ -1313,7 +1340,10 @@ def _first_present(columns, candidates):
 
 def _csv_columns(path):
     try:
-        return list(pd.read_csv(path, nrows=0).columns)
+        if path.suffix == ".parquet":
+            return list(pd.read_parquet(path).columns)
+        else:
+            return list(pd.read_csv(path, nrows=0).columns)
     except (FileNotFoundError, pd.errors.EmptyDataError):
         return []
 
@@ -1342,11 +1372,19 @@ def read_output_key_counts(paths, key_columns):
     row_count = 0
     for path in paths:
         try:
-            frame = pd.read_csv(path, dtype=str, usecols=key_columns)
+            if path.suffix.lower() == ".parquet":
+                frame = pd.read_parquet(path)
+            else:
+                frame = pd.read_csv(path, dtype=str, usecols=key_columns)
         except (FileNotFoundError, pd.errors.EmptyDataError, ValueError):
             continue
         row_count += len(frame)
         frames.append(frame)
+
+        # Normalize all key columns to string for consistent merging
+        for col in key_columns:
+            if col in frame.columns:
+                frame[col] = frame[col].astype(str)
 
     if not frames:
         return pd.DataFrame(columns=key_columns + ["row_count"]), row_count
@@ -1412,6 +1450,8 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
 
     source_counts.rename(columns={"row_count": "source_count"}, inplace=True)
     combined_counts.rename(columns={"row_count": "combined_count"}, inplace=True)
+    print(source_counts.dtypes)
+    print(combined_counts.dtypes)
     merged = source_counts.merge(combined_counts, on=key_columns, how="left")
     merged["combined_count"] = merged["combined_count"].fillna(0).astype(int)
     missing = merged[merged["source_count"] > merged["combined_count"]].copy()
@@ -1450,7 +1490,7 @@ def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None)
         (
             "ephemeris",
             [chunk.ew_output_path for chunk in chunks],
-            final_output.with_name(f"{final_output.stem}_ew.csv"),
+            final_output.with_name(f"{final_output.stem}_ew.parquet"),
         ),
     ]
     for output_name, source_paths, combined_path in output_sets:
@@ -1460,6 +1500,8 @@ def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None)
         audit_rows.append(summary)
         if not missing.empty:
             missing_frames.append(missing)
+
+    print(audit_rows)
 
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(audit_rows).to_csv(audit_path, index=False)
