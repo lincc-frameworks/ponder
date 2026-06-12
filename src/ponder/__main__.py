@@ -11,6 +11,12 @@ def main():
     parser.add_argument("--db", type=Path, help="Path to the database file")
     parser.add_argument("--orbits", type=Path, help="Path to the orbits JSON file")
     parser.add_argument("--config", type=Path, help="Path to the configuration file")
+    parser.add_argument(
+        "--main-orbit-file",
+        type=Path,
+        default=Path.cwd() / "results/main_observations.parquet",
+        help="Path to the main orbit file to diff against and update",
+    )
     parser.add_argument("--comet", action="store_true", help="Whether to run comet analysis")
     parser.add_argument(
         "--work-dir", type=Path, default=Path.cwd() / "work", help="Directory to store intermediate files"
@@ -109,6 +115,7 @@ def main():
         orbit_path,
         args.config,
         comet=args.comet,
+        main_orbit_file=args.main_orbit_file,
         filter_orbits=not args.no_filter_orbits,
         chunk_size=args.chunk_size,
         sorcha_workers=args.sorcha_workers,
