@@ -360,6 +360,7 @@ def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_p
         object_path,
         config_path,
         comet=False,
+        main_orbit_file=tmp_path / "main_observations.parquet",
         chunk_size=10,
         sorcha_workers=1,
     )
@@ -407,6 +408,7 @@ def test_run_ponder_skips_unchanged_objects_when_no_new_pointings(tmp_path, monk
         object_path,
         config_path,
         comet=False,
+        main_orbit_file=tmp_path / "main_observations.parquet",
         chunk_size=10,
         sorcha_workers=1,
     )
@@ -454,6 +456,7 @@ def test_run_ponder_ignores_legacy_global_state_files(tmp_path, monkeypatch):
         object_path,
         config_path,
         comet=False,
+        main_orbit_file=tmp_path / "main_observations.parquet",
         chunk_size=10,
         sorcha_workers=1,
     )
