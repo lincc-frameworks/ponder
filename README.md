@@ -51,14 +51,31 @@ and also exposes hard links, or copies if hard links are not available, at
 conflicting top-level file already exists.
 
 For incremental runs, Ponder separates the Sorcha jobs by the work they need to
-cover. Unchanged objects run only against newly added pointings, new objects run
-against the full pointing database, and updated objects also run against the full
+cover. The default `--update-mode auto` preserves the full incremental cycle:
+unchanged objects run only against newly added pointings, new objects run against
+the full pointing database, and updated objects also run against the full
 pointing database. When there are no new pointings, the unchanged-object job is
 skipped. State and object-hash files are scoped by pointing database and object
 mode, so comet and asteroid runs can share one pointing database without sharing
 the same incremental baseline. Chunked outputs are written inside the
 digest-specific result directory so separate pointing database contexts do not
 overwrite or resume each other's results.
+
+Use `--update-mode new-objects` when the only intended update is newly
+discovered objects. This mode downloads or reads the MPC orbit file exactly like
+the default mode, diffs it against the existing object-hash baseline, runs only
+object IDs that are absent from that baseline against the full pointing
+database, and skips both new-pointing work for unchanged objects and updated
+orbit work for existing objects. Because it does not process existing objects
+against new pointings, it does not advance `last_mjd`; it only adds hashes for
+the newly processed object IDs. Each run writes
+`results/<date>_job_new_objects_report.csv` with the selected object IDs, run
+timestamp, mode, object type, DB/config paths, catalog snapshot path, and status.
+
+Orbit-change-triggered reruns currently use element hashes in the default auto
+mode. A future configurable threshold mode should store the prior element values
+themselves, not only hashes, so users can choose which columns and deltas count
+as meaningful orbit improvement.
 
 Each run also stores the input MPC catalog as a gzipped JSON snapshot under
 `results/catalogs/` and records that path in each job manifest. Ponder adds a

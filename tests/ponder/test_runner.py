@@ -318,6 +318,21 @@ def test_extract_new_pointings_creates_empty_observations_table(tmp_path):
         assert con.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 0
 
 
+def _asteroid(principal_desig, e=0.1):
+    return {
+        "Principal_desig": principal_desig,
+        "a": 2.0,
+        "e": e,
+        "i": 1.0,
+        "Node": 2.0,
+        "Peri": 3.0,
+        "M": 4.0,
+        "Epoch": 2461000.5,
+        "H": 15.0,
+        "U": 0,
+    }
+
+
 def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db_path = tmp_path / "pointings.db"
@@ -366,6 +381,127 @@ def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_p
 
     assert calls == [db_path]
     assert json.loads(hashes_file.read_text()) == runner.object_hashes(runner.read_json_catalog(object_path))
+
+
+def test_run_ponder_new_objects_mode_ignores_orbit_updates_and_preserves_last_mjd(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    db_path = tmp_path / "pointings.db"
+    object_path = tmp_path / "objects.json"
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[INPUT]\n")
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
+        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+        con.execute("INSERT INTO observations VALUES (2, 20.0)")
+
+    previous_a = _asteroid("A", e=0.1)
+    current_a = _asteroid("A", e=0.2)
+    unchanged_b = _asteroid("B")
+    new_c = _asteroid("C")
+    objects = [current_a, unchanged_b, new_c]
+    object_path.write_text(json.dumps(objects))
+
+    state_file, hashes_file = runner.state_files_for_run(db_path, comet=False)
+    state_file.write_text(json.dumps({"last_mjd": 10.0}))
+    previous_hashes = runner.object_hashes([previous_a, unchanged_b])
+    hashes_file.write_text(json.dumps(previous_hashes))
+
+    calls = []
+
+    def fake_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        input_rows = pd.read_csv(orbits)
+        calls.append((Path(db), input_rows["ObjID"].tolist()))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ObjID,fieldMJD_TAI\nC,10\n")
+        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nC,10\n")
+
+    monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
+
+    runner.run_ponder(
+        db_path,
+        object_path,
+        config_path,
+        comet=False,
+        chunk_size=10,
+        sorcha_workers=1,
+        update_mode=runner.UPDATE_MODE_NEW_OBJECTS,
+    )
+
+    assert calls == [(db_path, ["C"])]
+    assert json.loads(state_file.read_text()) == {"last_mjd": 10.0}
+
+    expected_hashes = dict(previous_hashes)
+    expected_hashes.update(runner.object_hashes([new_c]))
+    assert json.loads(hashes_file.read_text()) == expected_hashes
+    assert json.loads(hashes_file.read_text())["A"] == runner.hash_orbit(previous_a)
+    assert json.loads(hashes_file.read_text())["A"] != runner.hash_orbit(current_a)
+
+    report_path = next((tmp_path / "results").glob("*_job_new_objects_report.csv"))
+    report = pd.read_csv(report_path)
+    assert report["object_id"].tolist() == ["C"]
+    assert report["update_mode"].tolist() == [runner.UPDATE_MODE_NEW_OBJECTS]
+    assert report["object_mode"].tolist() == ["asteroid"]
+    assert report["status"].tolist() == ["completed"]
+    assert report["db_path"].tolist() == [str(db_path)]
+    assert report["config_path"].tolist() == [str(config_path)]
+    assert report["catalog_snapshot_path"].str.contains("results/catalogs/").all()
+
+
+def test_run_ponder_auto_mode_keeps_default_incremental_behavior(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_path = tmp_path / "pointings.db"
+    object_path = tmp_path / "objects.json"
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[INPUT]\n")
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
+        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+        con.execute("INSERT INTO observations VALUES (2, 20.0)")
+
+    previous_a = _asteroid("A", e=0.1)
+    current_a = _asteroid("A", e=0.2)
+    unchanged_b = _asteroid("B")
+    new_c = _asteroid("C")
+    objects = [current_a, unchanged_b, new_c]
+    object_path.write_text(json.dumps(objects))
+
+    state_file, hashes_file = runner.state_files_for_run(db_path, comet=False)
+    state_file.write_text(json.dumps({"last_mjd": 10.0}))
+    hashes_file.write_text(json.dumps(runner.object_hashes([previous_a, unchanged_b])))
+
+    calls = []
+
+    def fake_run_sorcha(orbits, physparams, output, db, config, timeout=None):
+        input_rows = pd.read_csv(orbits)
+        calls.append((Path(db).name, input_rows["ObjID"].tolist()))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},10\n" for obj_id in input_rows["ObjID"])
+        )
+        output.with_name(f"{output.stem}_ew.csv").write_text(
+            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},10\n" for obj_id in input_rows["ObjID"])
+        )
+
+    monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
+
+    runner.run_ponder(
+        db_path,
+        object_path,
+        config_path,
+        comet=False,
+        chunk_size=10,
+        sorcha_workers=1,
+    )
+
+    assert calls == [
+        ("new_pointings.db", ["B"]),
+        ("pointings.db", ["C"]),
+        ("pointings.db", ["A"]),
+    ]
+    assert json.loads(state_file.read_text()) == {"last_mjd": 20.0}
+    assert json.loads(hashes_file.read_text()) == runner.object_hashes(objects)
 
 
 def test_run_ponder_skips_unchanged_objects_when_no_new_pointings(tmp_path, monkeypatch):

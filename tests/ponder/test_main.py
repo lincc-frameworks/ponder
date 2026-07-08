@@ -29,3 +29,31 @@ def test_download_orbits_without_db_skips_analysis(monkeypatch, tmp_path, capsys
     assert f"downloaded orbits to {orbit_path}" in out
     assert "Skipping Ponder analysis" in out
     assert "Running comet analysis" not in out
+
+
+def test_update_mode_is_passed_to_run_ponder(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_ponder(*args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ponder",
+            "--db",
+            str(tmp_path / "pointings.db"),
+            "--orbits",
+            str(tmp_path / "objects.json"),
+            "--config",
+            str(tmp_path / "config.ini"),
+            "--update-mode",
+            "new-objects",
+        ],
+    )
+    monkeypatch.setattr(ponder_main, "run_ponder", fake_run_ponder)
+
+    ponder_main.main()
+
+    assert calls[0]["update_mode"] == "new-objects"

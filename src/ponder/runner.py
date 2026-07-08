@@ -26,6 +26,9 @@ DEFAULT_SORCHA_WORKERS = 1
 DEFAULT_DEBUG_FAILED_CHUNK_SIZE = 250
 DEFAULT_ISOLATE_FAILING_ROWS = True
 CATALOG_ROW_COLUMN = "ponder_catalog_row"
+UPDATE_MODE_AUTO = "auto"
+UPDATE_MODE_NEW_OBJECTS = "new-objects"
+UPDATE_MODES = (UPDATE_MODE_AUTO, UPDATE_MODE_NEW_OBJECTS)
 
 # Sorcha output schemas have shifted between releases, so audits look for the
 # first usable object/time columns instead of assuming one fixed CSV shape.
@@ -1825,6 +1828,49 @@ def run_id_set(
     )
 
 
+def write_new_objects_report(
+    object_ids,
+    timestamp,
+    comet,
+    db_path,
+    config_path,
+    catalog_snapshot_path,
+    status,
+    results_dir=None,
+):
+    """Write the object IDs selected by the new-objects-only update mode."""
+    if results_dir is None:
+        results_dir = RESULTS_DIR
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    report_path = results_dir / f"{timestamp[:10]}_job_new_objects_report.csv"
+    rows = [
+        {
+            "run_timestamp_utc": timestamp,
+            "update_mode": UPDATE_MODE_NEW_OBJECTS,
+            "object_id": object_id,
+            "object_mode": "comet" if comet else "asteroid",
+            "db_path": str(db_path),
+            "config_path": str(config_path),
+            "catalog_snapshot_path": str(catalog_snapshot_path),
+            "status": status,
+        }
+        for object_id in object_ids
+    ]
+    columns = [
+        "run_timestamp_utc",
+        "update_mode",
+        "object_id",
+        "object_mode",
+        "db_path",
+        "config_path",
+        "catalog_snapshot_path",
+        "status",
+    ]
+    pd.DataFrame(rows, columns=columns).to_csv(report_path, index=False)
+    return report_path
+
+
 def run_ponder(
     db_path,
     object_path,
@@ -1841,8 +1887,12 @@ def run_ponder(
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
+    update_mode=UPDATE_MODE_AUTO,
 ):
     """Run Ponder on the given configs."""
+    if update_mode not in UPDATE_MODES:
+        raise ValueError(f"Unknown update mode: {update_mode}")
+
     db_path = Path(db_path)
     object_path = Path(object_path)
     config_path = Path(config_path)
@@ -1887,11 +1937,8 @@ def run_ponder(
         f"  Objects — new: {len(new_ids)}  updated: {len(updated_ids)}  " f"unchanged: {len(unchanged_ids)}"
     )
 
-    new_pts_db = WORK_DIR / "new_pointings.db"
-    n_new_pts = extract_new_pointings(db_path, state["last_mjd"], new_pts_db)
     db_last_mjd = db_max_mjd(db_path)
     total_pts = db_count(db_path)
-    print(f"  Pointings — new: {n_new_pts}  total: {total_pts}")
     full_context_digest = run_context_digest(
         db_path,
         config_path,
@@ -1900,6 +1947,58 @@ def run_ponder(
         db_max_mjd=db_last_mjd,
         db_row_count=total_pts,
     )
+
+    if update_mode == UPDATE_MODE_NEW_OBJECTS:
+        print("  Update mode — new-objects; skipping new-pointing and updated-object jobs")
+        new_done = run_id_set(
+            objects,
+            new_ids,
+            "new",
+            ts,
+            comet,
+            db_path,
+            config_path,
+            chunk_size,
+            sorcha_workers,
+            timeout=sorcha_timeout,
+            resume=resume_chunks,
+            only_chunks=selected_chunks,
+            catalog_snapshot_path=catalog_snapshot_path,
+            context_digest=full_context_digest,
+            debug_failed_chunk_size=debug_failed_chunk_size,
+            force_debug_chunking=force_debug_chunking,
+            isolate_failing_rows=isolate_failing_rows,
+        )
+        report_status = "completed" if new_done else "partial"
+        report_path = write_new_objects_report(
+            new_ids,
+            ts,
+            comet,
+            db_path,
+            config_path,
+            catalog_snapshot_path,
+            report_status,
+        )
+        print(f"  Wrote new-object report to {report_path}")
+        if not new_done:
+            print("  Partial chunk run requested; state not updated")
+            return
+
+        new_id_set = set(new_ids)
+        new_hashes = {
+            object_id: object_hash
+            for object_id, object_hash in object_hashes(objects).items()
+            if object_id in new_id_set
+        }
+        merged_hashes = dict(prev_hashes)
+        merged_hashes.update(new_hashes)
+        hashes_file.write_text(json.dumps(merged_hashes))
+        print("  New-objects mode complete; last_mjd state unchanged")
+        return
+
+    new_pts_db = WORK_DIR / "new_pointings.db"
+    n_new_pts = extract_new_pointings(db_path, state["last_mjd"], new_pts_db)
+    print(f"  Pointings — new: {n_new_pts}  total: {total_pts}")
     # Unchanged objects only need new pointings, while new/updated objects need
     # the full DB history. Use separate digests so chunk resume mirrors that scope.
     new_pointings_context_digest = run_context_digest(

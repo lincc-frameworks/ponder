@@ -2,7 +2,13 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .runner import DEFAULT_DEBUG_FAILED_CHUNK_SIZE, DEFAULT_ISOLATE_FAILING_ROWS, run_ponder
+from .runner import (
+    DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
+    DEFAULT_ISOLATE_FAILING_ROWS,
+    UPDATE_MODE_AUTO,
+    UPDATE_MODES,
+    run_ponder,
+)
 from .utils import get_current_orbits
 
 
@@ -20,6 +26,12 @@ def main():
     )
     parser.add_argument(
         "--no-filter-orbits", action="store_true", help="Disable the default orbit-catalog filter"
+    )
+    parser.add_argument(
+        "--update-mode",
+        choices=UPDATE_MODES,
+        default=UPDATE_MODE_AUTO,
+        help="Select incremental behavior. auto preserves the default full incremental cycle.",
     )
     parser.add_argument(
         "--chunk-size",
@@ -120,6 +132,7 @@ def main():
         debug_failed_chunk_size=args.debug_failed_chunk_size,
         force_debug_chunking=args.force_debug_chunking,
         isolate_failing_rows=args.isolate_failing_rows,
+        update_mode=args.update_mode,
     )
 
 
