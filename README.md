@@ -26,6 +26,41 @@ Ponder runs Sorcha against an orbit catalog and a pointing database:
 ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-2026.json --db from_rubin_dp1.db
 ```
 
+## Exporting Rubin Pointings
+
+Ponder also ships `ponder-exposures-exporter`, a Ponder-adjacent convenience
+command for querying Rubin Butler exposure records and writing pointing inputs.
+It scans one or more Butler repos, deduplicates pointings by exposure start
+time, writes a full CSV, writes a reduced export CSV, and can write both a
+Sorcha-formatted observations CSV and a SQLite pointing database.
+
+The exporter needs an LSST stack environment with `lsst.daf.butler` available
+when querying Butler. When running from a source checkout, prepend `src` to the
+existing `PYTHONPATH` instead of replacing it so LSST stack paths remain
+available:
+
+```bash
+PYTHONPATH=src:$PYTHONPATH python -m ponder_tools.exposures_exporter \
+  --full-csv /path/to/pointing_dbs/pointings_full.csv \
+  --export-csv /path/to/pointing_dbs/pointings_export.csv \
+  --sorcha-csv /path/to/pointing_dbs/pointings_sorcha.csv \
+  --sqlite-db /path/to/pointing_dbs/pointings.sqlite
+```
+
+If a Sorcha-formatted pointing CSV already exists, create or refresh only the
+SQLite DB without querying Butler:
+
+```bash
+PYTHONPATH=src:$PYTHONPATH python -m ponder_tools.exposures_exporter \
+  --sqlite-source-csv /path/to/pointing_dbs/pointings_sorcha.csv \
+  --sqlite-db /path/to/pointing_dbs/pointings.sqlite
+```
+
+The SQLite output contains an `observations` table with the column names used by
+the Ponder Sorcha config: `observationId`, `observationStartMJD`, `visitTime`,
+`visitExposureTime`, `band`, `seeingFwhmGeom`, `seeingFwhmEff`,
+`fiveSigmaDepth`, `fieldRA`, `fieldDec`, and `rotSkyPos`.
+
 For MPCORB asteroid catalogs, Ponder filters the input catalog by default before
 building Sorcha inputs. It keeps objects with semimajor axis greater than 30 au,
 uncertainty code no greater than 6, or an observation arc of at least 3 days. If
