@@ -61,6 +61,48 @@ the Ponder Sorcha config: `observationId`, `observationStartMJD`, `visitTime`,
 `visitExposureTime`, `band`, `seeingFwhmGeom`, `seeingFwhmEff`,
 `fiveSigmaDepth`, `fieldRA`, `fieldDec`, and `rotSkyPos`.
 
+## Running the Scratch Baseline on Slurm
+
+The production scratch run can be launched with:
+
+```bash
+sbatch scripts/run_ponder_scratch.sbatch
+```
+
+The default script targets `/sdf/scratch/rubin/kbmod/ponder`, uses
+`pointing_dbs/pointings.sqlite` and `sorcha_ponder_config.ini`, downloads current
+MPC orbits, runs `--update-mode auto`, and uses two Sorcha workers with 5000-row
+chunks. Logs are written to `/sdf/scratch/rubin/kbmod/ponder/logs/ponder-%j.out`.
+
+To run a tiny synthetic Slurm smoke job before the full baseline, point the same
+script at a one-object scratch workspace:
+
+```bash
+PONDER_RUN_DIR=/sdf/scratch/rubin/kbmod/ponder/slurm_smoke \
+PONDER_DB=/sdf/scratch/rubin/kbmod/ponder/slurm_smoke/pointings.sqlite \
+PONDER_CONFIG=/sdf/scratch/rubin/kbmod/ponder/slurm_smoke/sorcha_ponder_config.ini \
+PONDER_WORK_DIR=/sdf/scratch/rubin/kbmod/ponder/slurm_smoke/work \
+DOWNLOAD_ORBITS=0 \
+ORBITS=/sdf/scratch/rubin/kbmod/ponder/slurm_smoke/objects.json \
+CHUNK_SIZE=10 \
+SORCHA_WORKERS=1 \
+SORCHA_TIMEOUT=300 \
+sbatch --job-name=ponder-smoke --time=00:30:00 --cpus-per-task=1 --mem=16G \
+  scripts/run_ponder_scratch.sbatch
+```
+
+To run a later newly discovered objects pass against the same pointing DB and
+saved baseline:
+
+```bash
+UPDATE_MODE=new-objects sbatch scripts/run_ponder_scratch.sbatch
+```
+
+Completed chunks are resumable through their `.done` markers under
+`results/chunk_runs/`. If a Slurm job times out before Ponder writes final state,
+relaunch the same `sbatch` command; completed chunks are skipped, failed chunks
+resume into debug/isolation handling, and pending chunks continue.
+
 For MPCORB asteroid catalogs, Ponder filters the input catalog by default before
 building Sorcha inputs. It keeps objects with semimajor axis greater than 30 au,
 uncertainty code no greater than 6, or an observation arc of at least 3 days. If
