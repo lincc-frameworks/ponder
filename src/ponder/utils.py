@@ -3,7 +3,6 @@ import hashlib
 import re
 import sqlite3
 
-import numpy as np
 import pandas as pd
 import requests
 from astropy.time import Time
@@ -305,6 +304,39 @@ def extract_new_pointings(db_path, last_mjd, out_path):
         src.close()
         dst.close()
     return num_rows
+
+
+def invalid_observation_rows(db_path, sample_limit=5):
+    con = sqlite3.connect(db_path)
+    try:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(observations)").fetchall()}
+        required = {"observationId", "fieldRA", "fieldDec"}
+        missing = sorted(required - columns)
+        if missing:
+            raise ValueError(f"observations table is missing required columns: {missing}")
+
+        df = pd.read_sql_query("SELECT observationId, fieldRA, fieldDec FROM observations", con)
+    finally:
+        con.close()
+
+    ra = pd.to_numeric(df["fieldRA"], errors="coerce")
+    dec = pd.to_numeric(df["fieldDec"], errors="coerce")
+    invalid = df.loc[
+        ra.isna() | dec.isna() | (ra < 0.0) | (ra >= 360.0) | (dec < -90.0) | (dec > 90.0)
+    ]
+    return len(df), invalid.head(sample_limit)
+
+
+def validate_observations_db(db_path):
+    total_rows, invalid_sample = invalid_observation_rows(db_path)
+    if len(invalid_sample) == 0:
+        return total_rows
+
+    sample = invalid_sample.to_dict(orient="records")
+    raise ValueError(
+        f"Invalid pointing DB {db_path}: found rows with missing or out-of-range fieldRA/fieldDec; "
+        f"sample={sample}"
+    )
 
 
 def db_max_mjd(db_path):

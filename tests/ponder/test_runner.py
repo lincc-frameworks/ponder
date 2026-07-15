@@ -9,6 +9,19 @@ import pytest
 from ponder import runner
 
 
+def _write_observations_db(path, mjds):
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "CREATE TABLE observations ("
+            "observationId INTEGER, observationStartMJD REAL, fieldRA REAL, fieldDec REAL)"
+        )
+        for index, mjd in enumerate(mjds, start=1):
+            con.execute(
+                "INSERT INTO observations VALUES (?, ?, ?, ?)",
+                (index, mjd, 10.0 + index, -5.0),
+            )
+
+
 def test_plan_sorcha_chunks_uses_digest_and_row_ranges(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "WORK_DIR", tmp_path / "work")
     monkeypatch.setattr(runner, "RESULTS_DIR", tmp_path / "results")
@@ -339,9 +352,7 @@ def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_p
     object_path = tmp_path / "objects.json"
     config_path = tmp_path / "config.ini"
     config_path.write_text("[INPUT]\n")
-    with sqlite3.connect(db_path) as con:
-        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
-        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+    _write_observations_db(db_path, [10.0])
     state_file, hashes_file = runner.state_files_for_run(db_path, comet=False)
     state_file.write_text(json.dumps({"last_mjd": 10.0}))
 
@@ -391,10 +402,7 @@ def test_run_ponder_new_objects_mode_ignores_orbit_updates_and_preserves_last_mj
     object_path = tmp_path / "objects.json"
     config_path = tmp_path / "config.ini"
     config_path.write_text("[INPUT]\n")
-    with sqlite3.connect(db_path) as con:
-        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
-        con.execute("INSERT INTO observations VALUES (1, 10.0)")
-        con.execute("INSERT INTO observations VALUES (2, 20.0)")
+    _write_observations_db(db_path, [10.0, 20.0])
 
     previous_a = _asteroid("A", e=0.1)
     current_a = _asteroid("A", e=0.2)
@@ -455,10 +463,7 @@ def test_run_ponder_auto_mode_keeps_default_incremental_behavior(tmp_path, monke
     object_path = tmp_path / "objects.json"
     config_path = tmp_path / "config.ini"
     config_path.write_text("[INPUT]\n")
-    with sqlite3.connect(db_path) as con:
-        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
-        con.execute("INSERT INTO observations VALUES (1, 10.0)")
-        con.execute("INSERT INTO observations VALUES (2, 20.0)")
+    _write_observations_db(db_path, [10.0, 20.0])
 
     previous_a = _asteroid("A", e=0.1)
     current_a = _asteroid("A", e=0.2)
@@ -510,9 +515,7 @@ def test_run_ponder_skips_unchanged_objects_when_no_new_pointings(tmp_path, monk
     object_path = tmp_path / "objects.json"
     config_path = tmp_path / "config.ini"
     config_path.write_text("[INPUT]\n")
-    with sqlite3.connect(db_path) as con:
-        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
-        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+    _write_observations_db(db_path, [10.0])
 
     objects = [
         {
@@ -554,9 +557,7 @@ def test_run_ponder_ignores_legacy_global_state_files(tmp_path, monkeypatch):
     object_path = tmp_path / "objects.json"
     config_path = tmp_path / "config.ini"
     config_path.write_text("[INPUT]\n")
-    with sqlite3.connect(db_path) as con:
-        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
-        con.execute("INSERT INTO observations VALUES (1, 10.0)")
+    _write_observations_db(db_path, [10.0])
 
     objects = [
         {
@@ -595,6 +596,36 @@ def test_run_ponder_ignores_legacy_global_state_files(tmp_path, monkeypatch):
     )
 
     assert calls == [db_path]
+
+
+def test_run_ponder_rejects_invalid_pointing_db_before_sorcha(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_path = tmp_path / "pointings.db"
+    object_path = tmp_path / "objects.json"
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[INPUT]\n")
+    object_path.write_text(json.dumps([_asteroid("A")]))
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "CREATE TABLE observations ("
+            "observationId INTEGER, observationStartMJD REAL, fieldRA REAL, fieldDec REAL)"
+        )
+        con.execute("INSERT INTO observations VALUES (1, 10.0, NULL, -5.0)")
+
+    def fail_if_called(orbits, physparams, output, db, config, timeout=None):
+        raise AssertionError("Sorcha should not run with invalid pointing geometry")
+
+    monkeypatch.setattr(runner, "run_sorcha", fail_if_called)
+
+    with pytest.raises(ValueError, match="Invalid pointing DB"):
+        runner.run_ponder(
+            db_path,
+            object_path,
+            config_path,
+            comet=False,
+            chunk_size=10,
+            sorcha_workers=1,
+        )
 
 
 def test_failed_chunks_write_summary_and_catalog_rows(tmp_path, monkeypatch):

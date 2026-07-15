@@ -5,7 +5,9 @@ import pandas as pd
 from ponder import runner
 from ponder_tools.exposures_exporter import (
     OBSERVATION_COLUMNS,
+    observations_dataframe_from_full_export,
     observations_dataframe_from_sorcha,
+    write_observations_sqlite_from_csv,
     write_observations_sqlite_from_sorcha_csv,
 )
 
@@ -77,3 +79,77 @@ def test_write_observations_sqlite_from_sorcha_csv_supports_ponder_db_helpers(tm
     assert runner.extract_new_pointings(sqlite_path, 60000.5, new_db) == 1
     with sqlite3.connect(new_db) as con:
         assert con.execute("SELECT observationId FROM observations").fetchall() == [(102,)]
+
+
+def test_observations_dataframe_from_sorcha_drops_invalid_geometry():
+    sorcha = pd.DataFrame(
+        {
+            "observationId": [101, 102, 103, 104, 105],
+            "observationStartMJD_TAI": [60000.0, 60001.0, 60002.0, 60003.0, 60004.0],
+            "visitExposureTime": [30.0] * 5,
+            "filter": ["r"] * 5,
+            "fieldRA_deg": [10.0, None, "bad", 360.0, 20.0],
+            "fieldDec_deg": [-5.0, -5.0, -5.0, 0.0, 90.1],
+        }
+    )
+
+    observations = observations_dataframe_from_sorcha(sorcha)
+
+    assert observations["observationId"].tolist() == [101]
+    assert observations["fieldRA"].tolist() == [10.0]
+    assert observations["fieldDec"].tolist() == [-5.0]
+
+
+def test_observations_dataframe_from_full_export_drops_calibrations_with_coordinates():
+    full = pd.DataFrame(
+        {
+            "exposure_id": [1, 2, 3, 4, 5, 6, 7],
+            "timespan_begin_tai_jd": [2460000.5 + i for i in range(7)],
+            "exposure_time": [30.0] * 7,
+            "physical_filter": ["r_03"] * 7,
+            "tracking_ra": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, None],
+            "tracking_dec": [-5.0, -6.0, -7.0, -8.0, -9.0, -10.0, -11.0],
+            "sky_angle": [0.0] * 7,
+            "observation_type": ["science", "dark", "ccob", "acq", "focus", "engtest", "science"],
+            "observation_reason": [
+                "object",
+                "object",
+                "ccob",
+                "stray",
+                "focus",
+                "engtest",
+                "object",
+            ],
+        }
+    )
+
+    observations = observations_dataframe_from_full_export(full)
+
+    assert observations["observationId"].tolist() == [1, 4, 5, 6]
+
+
+def test_full_export_sqlite_supports_ponder_db_helpers_after_filtering(tmp_path):
+    source_path = tmp_path / "pointings_full.csv"
+    sqlite_path = tmp_path / "pointings.sqlite"
+    pd.DataFrame(
+        {
+            "exposure_id": [1, 2, 3, 4],
+            "timespan_begin_tai_jd": [2460000.5, 2460001.5, 2460002.5, 2460003.5],
+            "exposure_time": [30.0] * 4,
+            "physical_filter": ["r_03"] * 4,
+            "tracking_ra": [10.0, 20.0, 30.0, 40.0],
+            "tracking_dec": [-5.0, -6.0, -7.0, -8.0],
+            "sky_angle": [0.0] * 4,
+            "observation_type": ["science", "flat", "acq", "science"],
+            "observation_reason": ["object", "flat", "stray", "dark"],
+        }
+    ).to_csv(source_path, index=False)
+
+    write_observations_sqlite_from_csv(source_path, sqlite_path)
+
+    assert runner.db_count(sqlite_path) == 2
+    assert runner.db_max_mjd(sqlite_path) == 60002.0
+    new_db = tmp_path / "new_pointings.sqlite"
+    assert runner.extract_new_pointings(sqlite_path, 60000.5, new_db) == 1
+    with sqlite3.connect(new_db) as con:
+        assert con.execute("SELECT observationId FROM observations").fetchall() == [(3,)]

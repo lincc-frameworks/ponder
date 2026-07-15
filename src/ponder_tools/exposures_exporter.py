@@ -37,6 +37,44 @@ OBSERVATION_COLUMNS = [
     "fieldDec",
     "rotSkyPos",
 ]
+CALIBRATION_OBSERVATION_TERMS = {
+    "bias",
+    "ccob",
+    "cwfs",
+    "dark",
+    "expose",
+    "fe55",
+    "flat",
+    "indome",
+    "in-dome",
+    "scan",
+    "spot",
+    "stuttered",
+    "test",
+    "unknown",
+    "xtalk",
+}
+
+
+def _compact_text(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def _calibration_terms_compact() -> set[str]:
+    return {_compact_text(term) for term in CALIBRATION_OBSERVATION_TERMS}
+
+
+def _matches_calibration_term(value) -> bool:
+    compact = _compact_text(value)
+    if not compact:
+        return False
+    terms = _calibration_terms_compact()
+    if compact in terms:
+        return True
+    tokens = {_compact_text(token) for token in re.split(r"[^a-zA-Z0-9]+", str(value))}
+    return bool(tokens & terms)
 
 
 def _exp_to_dict(exp) -> dict:
@@ -105,6 +143,37 @@ def _optional_source(df: pd.DataFrame, candidates: list[str], default) -> pd.Ser
     return pd.Series([default] * len(df), index=df.index)
 
 
+def _invalid_geometry_mask(
+    df: pd.DataFrame, ra_column: str = "fieldRA", dec_column: str = "fieldDec"
+) -> pd.Series:
+    ra = pd.to_numeric(df[ra_column], errors="coerce")
+    dec = pd.to_numeric(df[dec_column], errors="coerce")
+    return ra.isna() | dec.isna() | (ra < 0.0) | (ra >= 360.0) | (dec < -90.0) | (dec > 90.0)
+
+
+def filter_valid_observations(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep rows with numeric, in-range sky coordinates."""
+    out = df.copy()
+    out["fieldRA"] = pd.to_numeric(out["fieldRA"], errors="coerce")
+    out["fieldDec"] = pd.to_numeric(out["fieldDec"], errors="coerce")
+    return out.loc[~_invalid_geometry_mask(out)].reset_index(drop=True)
+
+
+def calibration_pointing_mask(df: pd.DataFrame) -> pd.Series:
+    """Return rows whose type/reason marks them as calibration or non-sky test data."""
+    mask = pd.Series(False, index=df.index)
+    for column in ["observation_type", "observation_reason"]:
+        if column not in df.columns:
+            continue
+        mask |= df[column].apply(_matches_calibration_term)
+    return mask
+
+
+def filter_full_pointing_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop calibration/test rows before converting Butler/full-export pointings."""
+    return df.loc[~calibration_pointing_mask(df)].reset_index(drop=True)
+
+
 def observations_dataframe_from_sorcha(df: pd.DataFrame) -> pd.DataFrame:
     """Convert a Sorcha-formatted pointing dataframe into Ponder's SQLite schema."""
     observation_start = _required_source(
@@ -132,7 +201,13 @@ def observations_dataframe_from_sorcha(df: pd.DataFrame) -> pd.DataFrame:
             "rotSkyPos": _optional_source(df, ["rotSkyPos", "fieldRotSkyPos_deg"], None),
         }
     )
-    return out[OBSERVATION_COLUMNS]
+    return filter_valid_observations(out[OBSERVATION_COLUMNS])
+
+
+def observations_dataframe_from_full_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Create SQLite observations from a full Butler/export dataframe with type filtering."""
+    filtered = filter_full_pointing_dataframe(df)
+    return observations_dataframe_from_sorcha(make_sorcha_dataframe(filtered))
 
 
 def write_observations_sqlite_from_sorcha_csv(
@@ -141,6 +216,20 @@ def write_observations_sqlite_from_sorcha_csv(
     """Create a SQLite observations table from an existing Sorcha pointing CSV."""
     df = pd.read_csv(sorcha_csv_path)
     observations = observations_dataframe_from_sorcha(df)
+    return _write_sqlite(observations, sqlite_path)
+
+
+def write_observations_sqlite_from_csv(source_csv_path: str | Path, sqlite_path: str | Path) -> Path:
+    """Create a SQLite observations table from either full-export or Sorcha pointing CSV."""
+    df = pd.read_csv(source_csv_path)
+    if {"tracking_ra", "tracking_dec"}.issubset(df.columns):
+        observations = observations_dataframe_from_full_export(df)
+    else:
+        print(
+            "Warning: source CSV has no observation_type/observation_reason metadata; "
+            "only RA/Dec validity filtering can be applied."
+        )
+        observations = observations_dataframe_from_sorcha(df)
     return _write_sqlite(observations, sqlite_path)
 
 
@@ -505,7 +594,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--sqlite-source-csv",
         default="",
-        help="Convert an existing Sorcha pointing CSV to --sqlite-db and skip Butler queries.",
+        help=(
+            "Convert an existing pointing CSV to --sqlite-db and skip Butler queries. "
+            "Full exports with tracking_ra/tracking_dec get calibration filtering; "
+            "Sorcha CSVs get coordinate filtering only."
+        ),
     )
     parser.add_argument(
         "--export-fields",
@@ -537,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.sqlite_source_csv:
         if not sqlite_db:
             raise ValueError("--sqlite-source-csv requires --sqlite-db")
-        sqlite_path = write_observations_sqlite_from_sorcha_csv(args.sqlite_source_csv, sqlite_db)
+        sqlite_path = write_observations_sqlite_from_csv(args.sqlite_source_csv, sqlite_db)
         with sqlite3.connect(sqlite_path) as con:
             count = con.execute(f"SELECT COUNT(*) FROM {OBSERVATIONS_TABLE}").fetchone()[0]
         print(f"Wrote SQLite observations DB: {sqlite_path} ({count:,} rows)")
@@ -585,7 +678,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_csv(df_sorcha, sorcha_csv)
             print(f"Wrote Sorcha CSV: {sorcha_csv} ({len(df_sorcha):,} rows)")
         if sqlite_db:
-            observations = observations_dataframe_from_sorcha(df_sorcha)
+            observations = observations_dataframe_from_full_export(df_full)
             sqlite_path = _write_sqlite(observations, sqlite_db)
             print(f"Wrote SQLite observations DB: {sqlite_path} ({len(observations):,} rows)")
 

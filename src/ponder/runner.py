@@ -1907,6 +1907,8 @@ def run_ponder(
 
     WORK_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
+    validated_rows = validate_observations_db(db_path)
+    print(f"  Pointing DB validation — rows: {validated_rows}")
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     catalog_snapshot_path = write_mpc_catalog_snapshot(object_path, RESULTS_DIR, ts)
