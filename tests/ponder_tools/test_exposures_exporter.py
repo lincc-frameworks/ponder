@@ -100,17 +100,36 @@ def test_observations_dataframe_from_sorcha_drops_invalid_geometry():
     assert observations["fieldDec"].tolist() == [-5.0]
 
 
-def test_observations_dataframe_from_full_export_drops_calibrations_with_coordinates():
+def test_observations_dataframe_from_full_export_drops_calibrations_and_other_instruments():
     full = pd.DataFrame(
         {
-            "exposure_id": [1, 2, 3, 4, 5, 6, 7],
-            "timespan_begin_tai_jd": [2460000.5 + i for i in range(7)],
-            "exposure_time": [30.0] * 7,
-            "physical_filter": ["r_03"] * 7,
-            "tracking_ra": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, None],
-            "tracking_dec": [-5.0, -6.0, -7.0, -8.0, -9.0, -10.0, -11.0],
-            "sky_angle": [0.0] * 7,
-            "observation_type": ["science", "dark", "ccob", "acq", "focus", "engtest", "science"],
+            "exposure_id": [1, 2, 3, 4, 5, 6, 7, 8],
+            "timespan_begin_tai_jd": [2460000.5 + i for i in range(8)],
+            "exposure_time": [30.0] * 8,
+            "physical_filter": ["r_03"] * 8,
+            "tracking_ra": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, None, 70.0],
+            "tracking_dec": [-5.0, -6.0, -7.0, -8.0, -9.0, -10.0, -11.0, -12.0],
+            "sky_angle": [0.0] * 8,
+            "instrument": [
+                "LSSTCam",
+                "LSSTCam",
+                "LSSTCam",
+                "LSSTComCam",
+                "LSSTComCam",
+                "LSSTCam",
+                "LSSTCam",
+                "OtherCam",
+            ],
+            "observation_type": [
+                "science",
+                "dark",
+                "ccob",
+                "acq",
+                "focus",
+                "engtest",
+                "science",
+                "science",
+            ],
             "observation_reason": [
                 "object",
                 "object",
@@ -118,6 +137,7 @@ def test_observations_dataframe_from_full_export_drops_calibrations_with_coordin
                 "stray",
                 "focus",
                 "engtest",
+                "object",
                 "object",
             ],
         }

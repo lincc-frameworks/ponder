@@ -24,6 +24,7 @@ from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import process_map
 
 OBSERVATIONS_TABLE = "observations"
+DEFAULT_INSTRUMENTS = ("LSSTCam", "LSSTComCam")
 OBSERVATION_COLUMNS = [
     "observationId",
     "observationStartMJD",
@@ -169,9 +170,14 @@ def calibration_pointing_mask(df: pd.DataFrame) -> pd.Series:
     return mask
 
 
-def filter_full_pointing_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def filter_full_pointing_dataframe(
+    df: pd.DataFrame, instruments: tuple[str, ...] = DEFAULT_INSTRUMENTS
+) -> pd.DataFrame:
     """Drop calibration/test rows before converting Butler/full-export pointings."""
-    return df.loc[~calibration_pointing_mask(df)].reset_index(drop=True)
+    keep = ~calibration_pointing_mask(df)
+    if instruments and "instrument" in df.columns:
+        keep &= df["instrument"].isin(instruments)
+    return df.loc[keep].reset_index(drop=True)
 
 
 def observations_dataframe_from_sorcha(df: pd.DataFrame) -> pd.DataFrame:
@@ -204,9 +210,11 @@ def observations_dataframe_from_sorcha(df: pd.DataFrame) -> pd.DataFrame:
     return filter_valid_observations(out[OBSERVATION_COLUMNS])
 
 
-def observations_dataframe_from_full_export(df: pd.DataFrame) -> pd.DataFrame:
+def observations_dataframe_from_full_export(
+    df: pd.DataFrame, instruments: tuple[str, ...] = DEFAULT_INSTRUMENTS
+) -> pd.DataFrame:
     """Create SQLite observations from a full Butler/export dataframe with type filtering."""
-    filtered = filter_full_pointing_dataframe(df)
+    filtered = filter_full_pointing_dataframe(df, instruments=instruments)
     return observations_dataframe_from_sorcha(make_sorcha_dataframe(filtered))
 
 
@@ -219,11 +227,15 @@ def write_observations_sqlite_from_sorcha_csv(
     return _write_sqlite(observations, sqlite_path)
 
 
-def write_observations_sqlite_from_csv(source_csv_path: str | Path, sqlite_path: str | Path) -> Path:
+def write_observations_sqlite_from_csv(
+    source_csv_path: str | Path,
+    sqlite_path: str | Path,
+    instruments: tuple[str, ...] = DEFAULT_INSTRUMENTS,
+) -> Path:
     """Create a SQLite observations table from either full-export or Sorcha pointing CSV."""
     df = pd.read_csv(source_csv_path)
     if {"tracking_ra", "tracking_dec"}.issubset(df.columns):
-        observations = observations_dataframe_from_full_export(df)
+        observations = observations_dataframe_from_full_export(df, instruments=instruments)
     else:
         print(
             "Warning: source CSV has no observation_type/observation_reason metadata; "
@@ -442,7 +454,7 @@ def pointings_from_repos(
     *,
     n_workers: int = 4,
     collections=None,
-    instruments=("LSSTCam", "LSSTComCam"),
+    instruments=DEFAULT_INSTRUMENTS,
     ignore_observation_types=("dark", "bias", "flat", "indome", "cwfs", "stuttered"),
     day_obs_min=None,
     day_obs_max=None,
@@ -569,7 +581,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--collections", nargs="+", default=None)
     parser.add_argument("--n-workers", type=int, default=4)
-    parser.add_argument("--instruments", nargs="+", default=["LSSTCam", "LSSTComCam"])
+    parser.add_argument("--instruments", nargs="+", default=list(DEFAULT_INSTRUMENTS))
     parser.add_argument("--only-science", action="store_true")
     parser.add_argument(
         "--ignore-observation-types",
@@ -630,7 +642,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.sqlite_source_csv:
         if not sqlite_db:
             raise ValueError("--sqlite-source-csv requires --sqlite-db")
-        sqlite_path = write_observations_sqlite_from_csv(args.sqlite_source_csv, sqlite_db)
+        sqlite_path = write_observations_sqlite_from_csv(
+            args.sqlite_source_csv,
+            sqlite_db,
+            instruments=tuple(args.instruments),
+        )
         with sqlite3.connect(sqlite_path) as con:
             count = con.execute(f"SELECT COUNT(*) FROM {OBSERVATIONS_TABLE}").fetchone()[0]
         print(f"Wrote SQLite observations DB: {sqlite_path} ({count:,} rows)")
@@ -678,7 +694,10 @@ def main(argv: list[str] | None = None) -> int:
             _write_csv(df_sorcha, sorcha_csv)
             print(f"Wrote Sorcha CSV: {sorcha_csv} ({len(df_sorcha):,} rows)")
         if sqlite_db:
-            observations = observations_dataframe_from_full_export(df_full)
+            observations = observations_dataframe_from_full_export(
+                df_full,
+                instruments=tuple(args.instruments),
+            )
             sqlite_path = _write_sqlite(observations, sqlite_db)
             print(f"Wrote SQLite observations DB: {sqlite_path} ({len(observations):,} rows)")
 
