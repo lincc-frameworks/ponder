@@ -1,4 +1,19 @@
-from ponder.utils import filter_orbit_objects, keep_mpcorb_object, mpcorb_observation_arc_at_least
+import gzip
+
+import pandas as pd
+
+from ponder.utils import (
+    SORCHA_DEFAULT_COLOR_OFFSETS,
+    SORCHA_DEFAULT_GS,
+    comets_to_sorcha_inputs,
+    filter_orbit_objects,
+    format_rubin_filter_list,
+    get_current_orbits,
+    keep_mpcorb_object,
+    mpcorb_observation_arc_at_least,
+    mpcorb_to_sorcha_inputs,
+    rubin_band,
+)
 
 
 def test_mpcorb_filter_keeps_distant_objects_with_short_arcs():
@@ -37,9 +52,77 @@ def test_filter_orbit_objects_leaves_comets_unchanged():
     assert filter_orbit_objects(objects, comet=False) == []
 
 
-import gzip
+def _assert_default_sorcha_phys_columns(phys):
+    assert phys["GS"].tolist() == [SORCHA_DEFAULT_GS]
+    for column, value in SORCHA_DEFAULT_COLOR_OFFSETS.items():
+        assert phys[column].tolist() == [value]
 
-from ponder.utils import get_current_orbits
+
+def test_mpcorb_to_sorcha_inputs_adds_all_filter_colour_offsets():
+    objects = [
+        {
+            "Principal_desig": "A",
+            "a": 2.0,
+            "e": 0.1,
+            "i": 1.0,
+            "Node": 2.0,
+            "Peri": 3.0,
+            "M": 4.0,
+            "Epoch": 2461000.5,
+            "H": 15.0,
+        }
+    ]
+
+    _, phys = mpcorb_to_sorcha_inputs(objects, ["A"])
+
+    assert phys["ObjID"].tolist() == ["A"]
+    assert phys["H_r"].tolist() == [15.0]
+    _assert_default_sorcha_phys_columns(phys)
+
+
+def test_comets_to_sorcha_inputs_adds_all_filter_colour_offsets():
+    objects = [
+        {
+            "Designation_and_name": "C/2026 A1",
+            "Provisional_packed_desig": None,
+            "Perihelion_dist": 4.0,
+            "e": 0.9,
+            "i": 1.0,
+            "Peri": 2.0,
+            "Node": 3.0,
+            "Epoch_year": 2026,
+            "Epoch_month": 1,
+            "Epoch_day": 1,
+            "Year_of_perihelion": 2026,
+            "Month_of_perihelion": 2,
+            "Day_of_perihelion": 1.5,
+            "H": 12.0,
+        }
+    ]
+
+    _, phys = comets_to_sorcha_inputs(objects, ["C/2026 A1"])
+
+    assert phys["ObjID"].tolist() == ["C/2026 A1"]
+    assert phys["H_r"].tolist() == [12.0]
+    _assert_default_sorcha_phys_columns(phys)
+
+
+def test_dp1_report_normalizes_physical_filter_to_band():
+    assert rubin_band("r_03") == "r"
+    assert rubin_band("g") == "g"
+    assert pd.isna(rubin_band("not_a_filter"))
+
+
+def test_filter_list_uses_rubin_filter_order():
+    values = ["z", "g", "r", "u", "i", "y", "g", None, "not_a_filter"]
+
+    assert format_rubin_filter_list(values) == "u,g,r,i,z,y"
+
+
+def test_physical_filter_list_uses_rubin_filter_order():
+    values = ["z_03", "r_03", "u_02", "g_01", "i_06", "y_04"]
+
+    assert format_rubin_filter_list(values, normalize=False) == "u_02,g_01,r_03,i_06,z_03,y_04"
 
 
 class MockResponse:

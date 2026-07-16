@@ -27,6 +27,17 @@ MPCCOM_URL = "https://www.minorplanetcenter.net/Extended_Files/allcometels.json.
 MPCORB_SEMIMAJOR_AXIS_LIMIT_AU = 30.0
 MPCORB_UNCERTAINTY_CODE_LIMIT = 6
 MPCORB_OBSERVATION_ARC_LIMIT_DAYS = 3.0
+SORCHA_DEFAULT_GS = 0.15
+SORCHA_DEFAULT_COLOR_OFFSETS = {
+    "u-r": 1.8,
+    "g-r": 0.5,
+    "i-r": -0.2,
+    "z-r": -0.3,
+    "y-r": -0.4,
+}
+RUBIN_FILTER_ORDER = ("u", "g", "r", "i", "z", "y")
+RUBIN_FILTER_BANDS = set(RUBIN_FILTER_ORDER)
+RUBIN_FILTER_SORT_INDEX = {band: index for index, band in enumerate(RUBIN_FILTER_ORDER)}
 
 
 # -- comet diff helpers --
@@ -148,6 +159,48 @@ def filter_orbit_objects(objects, comet=False):
     return [obj for obj in objects if keep_mpcorb_object(obj)]
 
 
+def add_default_sorcha_physical_columns(phys):
+    """Add generic colour columns needed for all Rubin filters in Sorcha."""
+    phys["GS"] = SORCHA_DEFAULT_GS
+    for column, value in SORCHA_DEFAULT_COLOR_OFFSETS.items():
+        phys[column] = value
+    return phys
+
+
+def rubin_band(value):
+    """Normalize a Rubin physical filter, such as r_03, to its broad band."""
+    if pd.isna(value):
+        return pd.NA
+    text = str(value).strip()
+    if not text:
+        return pd.NA
+    band = text.split("_", maxsplit=1)[0]
+    return band if band in RUBIN_FILTER_BANDS else pd.NA
+
+
+def sort_rubin_filter_names(values, *, normalize=True):
+    """Return unique Rubin filter names in ugrizy order."""
+    filters = []
+    for value in values:
+        if pd.isna(value):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        band = rubin_band(text)
+        if pd.isna(band):
+            continue
+        label = str(band) if normalize else text
+        filters.append((RUBIN_FILTER_SORT_INDEX[str(band)], label))
+
+    return [label for _, label in sorted(set(filters))]
+
+
+def format_rubin_filter_list(values, *, normalize=True):
+    """Format unique Rubin filter names in ugrizy order."""
+    return ",".join(sort_rubin_filter_names(values, normalize=normalize))
+
+
 def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
     df = pd.DataFrame(mpcorb_json)
 
@@ -176,7 +229,7 @@ def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
 
     orbs["Epoch"] = orbs["Epoch"] - 2400000.5
     orbs["FORMAT"] = "KEP"
-    phys["g-r"] = 0.5
+    phys = add_default_sorcha_physical_columns(phys)
 
     orbs.rename(
         columns={
@@ -275,9 +328,9 @@ def comets_to_sorcha_inputs(comets_json, ids):
         {
             "ObjID": orbs["ObjID"],
             "H_r": df["H"].values,
-            "g-r": 0.5,
         }
     )
+    phys = add_default_sorcha_physical_columns(phys)
     # phys.to_csv(physparams_out, index=False)
 
     return orbs, phys

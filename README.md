@@ -127,6 +127,31 @@ and also exposes hard links, or copies if hard links are not available, at
 `results/<date>_job_<job>.csv` and `results/<date>_job_<job>_ew.csv` when no
 conflicting top-level file already exists.
 
+## DP1 Heliocentric-Distance Reports
+
+Use `scripts/dp1_rh_report.py` to summarize a combined Ponder ephemeris file by
+object for the DP1 distant-object audit:
+
+```bash
+PYTHONPATH=src:$PYTHONPATH python scripts/dp1_rh_report.py \
+  --ephemeris /path/to/results/2026-07-15_job_new_ew.parquet \
+  --db /path/to/pointings_dp1_pre2025.sqlite \
+  --orbits /path/to/asteroid_orbits_15-07-2026.json \
+  --out-dir /path/to/reports
+```
+
+The script writes `dp1_rh_gt5_by_object.csv`,
+`dp1_rh_ge5_reduced_by_object.csv`, and `dp1_rh_report.md`. It defaults the
+detection file to the ephemeris path without `_ew`, so
+`2026-07-15_job_new_ew.parquet` pairs with `2026-07-15_job_new.parquet`; pass
+`--detections` to override that path. Apparent magnitude is derived from `H_r`,
+the run's fixed Sorcha color offsets, and `phase_function = none` distances.
+Mean positional uncertainty is read from matched Ponder detections as
+`astrometricSigma_deg * 3600` and may be blank for ephemeris-only rows without a
+matched detection. Local obsnight is derived from the `YYYYMMDD` prefix of the
+pointing `observationId`. Filter lists are formatted in Rubin `u,g,r,i,z,y`
+order.
+
 For incremental runs, Ponder separates the Sorcha jobs by the work they need to
 cover. The default `--update-mode auto` preserves the full incremental cycle:
 unchanged objects run only against newly added pointings, new objects run against
