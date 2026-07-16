@@ -140,12 +140,14 @@ PYTHONPATH=src:$PYTHONPATH python scripts/dp1_rh_report.py \
   --out-dir /path/to/reports
 ```
 
-The script writes `dp1_rh_gt5_by_object.csv`,
-`dp1_rh_ge5_reduced_by_object.csv`, and `dp1_rh_report.md`. It defaults the
-detection file to the ephemeris path without `_ew`, so
-`2026-07-15_job_new_ew.parquet` pairs with `2026-07-15_job_new.parquet`; pass
-`--detections` to override that path. Apparent magnitude is derived from `H_r`,
-the run's fixed Sorcha color offsets, and `phase_function = none` distances.
+The script writes `dp1_rh_all_by_object.csv` for the full pre-cutoff object
+summary, `dp1_rh_lt5_by_object.csv` for objects with at least one possible image
+below 5 au, `dp1_rh_gt5_by_object.csv`, `dp1_rh_ge5_reduced_by_object.csv`, and
+`dp1_rh_report.md`. It defaults the detection file to the ephemeris path without
+`_ew`, so `2026-07-15_job_new_ew.parquet` pairs with
+`2026-07-15_job_new.parquet`; pass `--detections` to override that path.
+Apparent magnitude is derived from `H_r`, the run's fixed Sorcha color offsets,
+and `phase_function = none` distances.
 Mean positional uncertainty is read from matched Ponder detections as
 `astrometricSigma_deg * 3600` and may be blank for ephemeris-only rows without a
 matched detection. Local obsnight is derived from the `YYYYMMDD` prefix of the

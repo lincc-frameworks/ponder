@@ -107,25 +107,25 @@ def add_detection_metadata(ephem: pd.DataFrame, detections_path: Path) -> pd.Dat
     return out
 
 
-def summarize(df: pd.DataFrame, threshold: float, inclusive: bool) -> pd.DataFrame:
-    mask = df["rH_au"] >= threshold if inclusive else df["rH_au"] > threshold
-    qualifying = df.loc[mask].copy()
+SUMMARY_COLUMNS = [
+    "ObjID",
+    "possible_image_count",
+    "mean_rH_au",
+    "mean_apparent_mag",
+    "mean_positional_uncertainty_arcsec",
+    "first_local_obsnight",
+    "last_local_obsnight",
+    "min_rH_au",
+    "max_rH_au",
+    "filter_bands",
+    "physical_filters",
+]
+
+
+def summarize_rows(df: pd.DataFrame) -> pd.DataFrame:
+    qualifying = df.copy()
     if qualifying.empty:
-        return pd.DataFrame(
-            columns=[
-                "ObjID",
-                "possible_image_count",
-                "mean_rH_au",
-                "mean_apparent_mag",
-                "mean_positional_uncertainty_arcsec",
-                "first_local_obsnight",
-                "last_local_obsnight",
-                "min_rH_au",
-                "max_rH_au",
-                "filter_bands",
-                "physical_filters",
-            ]
-        )
+        return pd.DataFrame(columns=SUMMARY_COLUMNS)
 
     summary = (
         qualifying.groupby("ObjID", dropna=False)
@@ -150,6 +150,15 @@ def summarize(df: pd.DataFrame, threshold: float, inclusive: bool) -> pd.DataFra
     return summary
 
 
+def summarize(df: pd.DataFrame, threshold: float, inclusive: bool) -> pd.DataFrame:
+    mask = df["rH_au"] >= threshold if inclusive else df["rH_au"] > threshold
+    return summarize_rows(df.loc[mask])
+
+
+def summarize_below(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    return summarize_rows(df.loc[df["rH_au"] < threshold])
+
+
 def format_markdown_table(df: pd.DataFrame) -> str:
     out = df.copy()
     for col in [
@@ -171,6 +180,8 @@ def write_markdown(
     detections_path: Path,
     db_path: Path,
     orbits_path: Path,
+    all_objects: pd.DataFrame,
+    lt5: pd.DataFrame,
     gt5: pd.DataFrame,
     ge5: pd.DataFrame,
 ) -> None:
@@ -184,8 +195,17 @@ def write_markdown(
         "- Apparent magnitude is derived with Sorcha's `phase_function = none` formula and Ponder's fixed color offsets.",
         "- Positional uncertainty is the mean matched Ponder `astrometricSigma_deg` value converted to arcseconds.",
         f"- Matched positional uncertainty is available for {gt5['mean_positional_uncertainty_arcsec'].notna().sum():,} of {len(gt5):,} `rH > 5 au` objects.",
+        f"- Unique objects before the `5 au` cutoff: {len(all_objects):,}",
+        f"- Unique objects with at least one possible image at `rH < 5 au`: {len(lt5):,}",
         f"- Unique objects with at least one possible image at `rH > 5 au`: {len(gt5):,}",
         f"- Unique objects with at least one possible image at `rH >= 5 au`: {len(ge5):,}",
+        "",
+        "## CSV Outputs",
+        "",
+        "- `dp1_rh_all_by_object.csv`: all objects before applying the `5 au` cutoff.",
+        "- `dp1_rh_lt5_by_object.csv`: objects with at least one possible image below `5 au`.",
+        "- `dp1_rh_gt5_by_object.csv`: objects with at least one possible image above `5 au`.",
+        "- `dp1_rh_ge5_reduced_by_object.csv`: reduced list using the inclusive `5 au` cutoff.",
         "",
         "## rH > 5 au Objects By Possible Images",
         "",
@@ -232,12 +252,18 @@ def main() -> int:
     ephem = add_observation_metadata(ephem, args.db, args.orbits)
     ephem = add_detection_metadata(ephem, detections_path)
 
+    all_objects = summarize_rows(ephem)
+    lt5 = summarize_below(ephem, args.threshold)
     gt5 = summarize(ephem, args.threshold, inclusive=False)
     ge5 = summarize(ephem, args.threshold, inclusive=True)
 
+    all_path = args.out_dir / "dp1_rh_all_by_object.csv"
+    lt5_path = args.out_dir / "dp1_rh_lt5_by_object.csv"
     gt5_path = args.out_dir / "dp1_rh_gt5_by_object.csv"
     ge5_path = args.out_dir / "dp1_rh_ge5_reduced_by_object.csv"
     report_path = args.out_dir / "dp1_rh_report.md"
+    all_objects.to_csv(all_path, index=False)
+    lt5.to_csv(lt5_path, index=False)
     gt5.to_csv(gt5_path, index=False)
     ge5.to_csv(ge5_path, index=False)
     write_markdown(
@@ -246,10 +272,14 @@ def main() -> int:
         detections_path=detections_path,
         db_path=args.db,
         orbits_path=args.orbits,
+        all_objects=all_objects,
+        lt5=lt5,
         gt5=gt5,
         ge5=ge5,
     )
 
+    print(f"Wrote {all_path} ({len(all_objects):,} objects)")
+    print(f"Wrote {lt5_path} ({len(lt5):,} objects)")
     print(f"Wrote {gt5_path} ({len(gt5):,} objects)")
     print(f"Wrote {ge5_path} ({len(ge5):,} objects)")
     print(f"Wrote {report_path}")
