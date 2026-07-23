@@ -132,11 +132,18 @@ conflicting top-level file already exists.
 Use `scripts/dp1_rh_report.py` to summarize a combined Ponder ephemeris file by
 object for the DP1 distant-object audit:
 
+The maintained central-raft cone configuration is
+`configs/dp1_comcam_circle_0p50.ini`. Its 0.50 degree radius encloses all nine
+LSSTComCam sensors while keeping Sorcha's 0.20 degree ephemeris buffer separate
+from the science footprint.
+
 ```bash
 PYTHONPATH=src:$PYTHONPATH python scripts/dp1_rh_report.py \
   --ephemeris /path/to/results/2026-07-15_job_new_ew.parquet \
   --db /path/to/pointings_dp1_pre2025.sqlite \
   --orbits /path/to/asteroid_orbits_15-07-2026.json \
+  --config /path/to/sorcha_ponder_config.ini \
+  --object-mode asteroid \
   --out-dir /path/to/reports
 ```
 
@@ -146,6 +153,10 @@ below 5 au, `dp1_rh_gt5_by_object.csv`, `dp1_rh_ge5_reduced_by_object.csv`, and
 `dp1_rh_report.md`. It defaults the detection file to the ephemeris path without
 `_ew`, so `2026-07-15_job_new_ew.parquet` pairs with
 `2026-07-15_job_new.parquet`; pass `--detections` to override that path.
+The report reads the circular FOV radius from `--config` and applies that
+strict pointing-centered cone to the buffered ephemeris output before any
+object summaries are calculated. Use `--object-mode comet` for an MPC comet
+catalog; comet output IDs are matched through `Designation_and_name`.
 Apparent magnitude is derived from `H_r`, the run's fixed Sorcha color offsets,
 and `phase_function = none` distances.
 Mean positional uncertainty is read from matched Ponder detections as

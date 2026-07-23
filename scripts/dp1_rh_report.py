@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import gzip
 import json
 import sqlite3
@@ -43,23 +44,70 @@ def read_detections(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=DETECTION_COLUMNS)
     if path.suffix == ".parquet":
-        return pd.read_parquet(path, columns=DETECTION_COLUMNS)
+        # A successful zero-detection Ponder run produces a valid Parquet file
+        # with no columns. Reindexing a full read handles that case while still
+        # selecting the report columns from normal outputs.
+        return pd.read_parquet(path).reindex(columns=DETECTION_COLUMNS)
     return pd.read_csv(path, usecols=lambda column: column in DETECTION_COLUMNS)
 
 
-def read_orbits(path: Path) -> pd.DataFrame:
+def read_orbits(path: Path, object_mode: str) -> pd.DataFrame:
     open_func = gzip.open if path.suffix == ".gz" else open
     with open_func(path, "rt") as handle:
         objects = json.load(handle)
     df = pd.DataFrame(objects)
-    return df[["Principal_desig", "H"]].rename(columns={"Principal_desig": "ObjID", "H": "H_r"})
+    id_column = "Principal_desig" if object_mode == "asteroid" else "Designation_and_name"
+    missing = [column for column in [id_column, "H"] if column not in df]
+    if missing:
+        raise KeyError(f"Orbit catalog is missing columns required for {object_mode} mode: {missing}")
+    return (
+        df[[id_column, "H"]]
+        .rename(columns={id_column: "ObjID", "H": "H_r"})
+        .dropna(subset=["ObjID"])
+        .drop_duplicates("ObjID")
+    )
 
 
 def read_pointing_metadata(db_path: Path) -> pd.DataFrame:
     with sqlite3.connect(db_path) as con:
-        out = pd.read_sql_query("SELECT observationId AS FieldID, band FROM observations", con)
+        out = pd.read_sql_query(
+            "SELECT observationId AS FieldID, band, fieldRA, fieldDec FROM observations", con
+        )
     out["local_obsnight"] = (out["FieldID"].astype("int64") // 100000).astype("int64")
     return out
+
+
+def read_circle_radius(config_path: Path) -> float:
+    parser = configparser.ConfigParser()
+    if not parser.read(config_path):
+        raise FileNotFoundError(f"Could not read Sorcha config: {config_path}")
+    camera_model = parser.get("FOV", "camera_model", fallback="").strip().lower()
+    if camera_model != "circle":
+        raise ValueError(f"DP1 report requires camera_model=circle; found {camera_model!r}")
+    radius = parser.getfloat("FOV", "circle_radius")
+    if radius <= 0.0:
+        raise ValueError(f"circle_radius must be positive; found {radius}")
+    return radius
+
+
+def filter_to_circle(ephem: pd.DataFrame, radius_deg: float) -> pd.DataFrame:
+    """Keep ephemerides strictly inside the configured pointing-centered cone."""
+    required = ["RA_deg", "Dec_deg", "fieldRA", "fieldDec"]
+    missing = [column for column in required if column not in ephem]
+    if missing:
+        raise KeyError(f"Cannot apply DP1 FOV filter; missing columns: {missing}")
+
+    object_ra = np.radians(pd.to_numeric(ephem["RA_deg"], errors="coerce"))
+    object_dec = np.radians(pd.to_numeric(ephem["Dec_deg"], errors="coerce"))
+    field_ra = np.radians(pd.to_numeric(ephem["fieldRA"], errors="coerce"))
+    field_dec = np.radians(pd.to_numeric(ephem["fieldDec"], errors="coerce"))
+    cosine = (
+        np.sin(object_dec) * np.sin(field_dec)
+        + np.cos(object_dec) * np.cos(field_dec) * np.cos(object_ra - field_ra)
+    )
+    out = ephem.copy()
+    out["fov_separation_deg"] = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+    return out.loc[out["fov_separation_deg"] < radius_deg].reset_index(drop=True)
 
 
 def add_distances(df: pd.DataFrame) -> pd.DataFrame:
@@ -75,9 +123,11 @@ def add_distances(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def add_observation_metadata(ephem: pd.DataFrame, db_path: Path, orbits_path: Path) -> pd.DataFrame:
+def add_observation_metadata(
+    ephem: pd.DataFrame, db_path: Path, orbits_path: Path, object_mode: str
+) -> pd.DataFrame:
     out = ephem.merge(read_pointing_metadata(db_path), on="FieldID", how="left")
-    out = out.merge(read_orbits(orbits_path), on="ObjID", how="left")
+    out = out.merge(read_orbits(orbits_path, object_mode), on="ObjID", how="left")
     offsets = {"r-r": 0.0, **SORCHA_DEFAULT_COLOR_OFFSETS}
     out["filter_band"] = out["band"].map(rubin_band)
     out["color_offset"] = out["filter_band"].map(lambda band: offsets.get(f"{band}-r", np.nan))
@@ -109,6 +159,8 @@ def add_detection_metadata(ephem: pd.DataFrame, detections_path: Path) -> pd.Dat
 
 SUMMARY_COLUMNS = [
     "ObjID",
+    "object_mode",
+    "fov_radius_deg",
     "possible_image_count",
     "mean_rH_au",
     "mean_apparent_mag",
@@ -130,6 +182,8 @@ def summarize_rows(df: pd.DataFrame) -> pd.DataFrame:
     summary = (
         qualifying.groupby("ObjID", dropna=False)
         .agg(
+            object_mode=("object_mode", "first"),
+            fov_radius_deg=("fov_radius_deg", "first"),
             possible_image_count=("FieldID", "count"),
             mean_rH_au=("rH_au", "mean"),
             mean_apparent_mag=("apparent_mag", "mean"),
@@ -147,7 +201,7 @@ def summarize_rows(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
         .sort_values(["possible_image_count", "mean_rH_au", "ObjID"], ascending=[False, False, True])
     )
-    return summary
+    return summary[SUMMARY_COLUMNS]
 
 
 def summarize(df: pd.DataFrame, threshold: float, inclusive: bool) -> pd.DataFrame:
@@ -180,6 +234,11 @@ def write_markdown(
     detections_path: Path,
     db_path: Path,
     orbits_path: Path,
+    config_path: Path,
+    object_mode: str,
+    fov_radius_deg: float,
+    pre_fov_rows: int,
+    post_fov_rows: int,
     all_objects: pd.DataFrame,
     lt5: pd.DataFrame,
     gt5: pd.DataFrame,
@@ -192,6 +251,11 @@ def write_markdown(
         f"- Detection source: `{detections_path}`",
         f"- Pointing DB: `{db_path}`",
         f"- Orbit catalog: `{orbits_path}`",
+        f"- Sorcha config: `{config_path}`",
+        f"- Object mode: `{object_mode}`",
+        f"- Circular FOV radius: `{fov_radius_deg:.6f} deg` (strict `<` cut)",
+        f"- Buffered ephemeris rows before FOV cut: {pre_fov_rows:,}",
+        f"- In-FOV ephemeris rows after FOV cut: {post_fov_rows:,}",
         "- Apparent magnitude is derived with Sorcha's `phase_function = none` formula and Ponder's fixed color offsets.",
         "- Positional uncertainty is the mean matched Ponder `astrometricSigma_deg` value converted to arcseconds.",
         f"- Matched positional uncertainty is available for {gt5['mean_positional_uncertainty_arcsec'].notna().sum():,} of {len(gt5):,} `rH > 5 au` objects.",
@@ -239,6 +303,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--db", required=True, type=Path)
     parser.add_argument("--orbits", required=True, type=Path)
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--object-mode", choices=["asteroid", "comet"], default="asteroid")
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--threshold", type=float, default=5.0)
     return parser.parse_args()
@@ -248,8 +314,13 @@ def main() -> int:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     detections_path = args.detections or infer_detections_path(args.ephemeris)
+    fov_radius_deg = read_circle_radius(args.config)
     ephem = add_distances(read_ephemeris(args.ephemeris))
-    ephem = add_observation_metadata(ephem, args.db, args.orbits)
+    ephem = add_observation_metadata(ephem, args.db, args.orbits, args.object_mode)
+    pre_fov_rows = len(ephem)
+    ephem = filter_to_circle(ephem, fov_radius_deg)
+    ephem["object_mode"] = args.object_mode
+    ephem["fov_radius_deg"] = fov_radius_deg
     ephem = add_detection_metadata(ephem, detections_path)
 
     all_objects = summarize_rows(ephem)
@@ -272,6 +343,11 @@ def main() -> int:
         detections_path=detections_path,
         db_path=args.db,
         orbits_path=args.orbits,
+        config_path=args.config,
+        object_mode=args.object_mode,
+        fov_radius_deg=fov_radius_deg,
+        pre_fov_rows=pre_fov_rows,
+        post_fov_rows=len(ephem),
         all_objects=all_objects,
         lt5=lt5,
         gt5=gt5,

@@ -107,6 +107,32 @@ def test_comets_to_sorcha_inputs_adds_all_filter_colour_offsets():
     _assert_default_sorcha_phys_columns(phys)
 
 
+def test_comets_to_sorcha_inputs_drops_rows_without_h():
+    objects = [
+        {
+            "Designation_and_name": "C/2026 A1",
+            "Provisional_packed_desig": None,
+            "Epoch_year": 2026,
+            "Epoch_month": 1,
+            "Epoch_day": 1,
+            "Year_of_perihelion": 2026,
+            "Month_of_perihelion": 2,
+            "Day_of_perihelion": 1.5,
+            "Perihelion_dist": 1.0,
+            "e": 0.9,
+            "i": 1.0,
+            "Peri": 2.0,
+            "Node": 3.0,
+            "H": None,
+        }
+    ]
+
+    orbits, phys = comets_to_sorcha_inputs(objects, ["C/2026 A1"])
+
+    assert orbits.empty
+    assert phys.empty
+
+
 def test_dp1_report_normalizes_physical_filter_to_band():
     assert rubin_band("r_03") == "r"
     assert rubin_band("g") == "g"

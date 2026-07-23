@@ -35,6 +35,15 @@ SORCHA_DEFAULT_COLOR_OFFSETS = {
     "z-r": -0.3,
     "y-r": -0.4,
 }
+COMET_REQUIRED_INPUT_COLUMNS = (
+    "Epoch_year",
+    "Epoch_month",
+    "Epoch_day",
+    "Year_of_perihelion",
+    "Month_of_perihelion",
+    "Day_of_perihelion",
+    "H",
+)
 RUBIN_FILTER_ORDER = ("u", "g", "r", "i", "z", "y")
 RUBIN_FILTER_BANDS = set(RUBIN_FILTER_ORDER)
 RUBIN_FILTER_SORT_INDEX = {band: index for index, band in enumerate(RUBIN_FILTER_ORDER)}
@@ -159,6 +168,11 @@ def filter_orbit_objects(objects, comet=False):
     return [obj for obj in objects if keep_mpcorb_object(obj)]
 
 
+def valid_comet_sorcha_row(obj):
+    """Return whether an MPC comet row has every value required by Sorcha."""
+    return not any(_is_missing(obj.get(column)) for column in COMET_REQUIRED_INPUT_COLUMNS)
+
+
 def add_default_sorcha_physical_columns(phys):
     """Add generic colour columns needed for all Rubin filters in Sorcha."""
     phys["GS"] = SORCHA_DEFAULT_GS
@@ -267,20 +281,11 @@ def comets_to_sorcha_inputs(comets_json, ids):
     )
     df = df[id_col.isin(ids)].copy()
 
-    # build epoch and perihelion MJD strings, dropping rows with missing epochs
+    # Build epoch and perihelion MJD strings, dropping rows that cannot form a
+    # complete Sorcha orbit/physical-parameter pair.
     epoch_strings, tp_strings, bad = [], [], []
     for r, row in df.iterrows():
-        if any(
-            pd.isna(row.get(c))
-            for c in [
-                "Epoch_year",
-                "Epoch_month",
-                "Epoch_day",
-                "Year_of_perihelion",
-                "Month_of_perihelion",
-                "Day_of_perihelion",
-            ]
-        ):
+        if not valid_comet_sorcha_row(row):
             # print(f"  [warn] dropping bad epoch: {row.get('Designation_and_name')}")
             bad.append(r)
             continue
@@ -295,8 +300,14 @@ def comets_to_sorcha_inputs(comets_json, ids):
 
     df = df.drop(bad).reset_index(drop=True)
 
-    df["epochMJD_TDB"] = Time(epoch_strings).mjd
-    df["t_p_MJD_TDB"] = Time([s for s, _ in tp_strings], format="iso").mjd + [f for _, f in tp_strings]
+    if df.empty:
+        df["epochMJD_TDB"] = pd.Series(dtype=float)
+        df["t_p_MJD_TDB"] = pd.Series(dtype=float)
+    else:
+        df["epochMJD_TDB"] = Time(epoch_strings).mjd
+        df["t_p_MJD_TDB"] = Time([s for s, _ in tp_strings], format="iso").mjd + [
+            f for _, f in tp_strings
+        ]
     df["FORMAT"] = "COM"
 
     # -- orbits file --

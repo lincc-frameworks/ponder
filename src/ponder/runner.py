@@ -228,20 +228,7 @@ def catalog_rows_for_sorcha_inputs(objects, ids, comet):
             df["Provisional_packed_desig"].notna(), df["Designation_and_name"]
         )
         df = df[id_col.isin(ids)].copy()
-
-        required_epoch_columns = [
-            "Epoch_year",
-            "Epoch_month",
-            "Epoch_day",
-            "Year_of_perihelion",
-            "Month_of_perihelion",
-            "Day_of_perihelion",
-        ]
-        bad = []
-        for row_index, row in df.iterrows():
-            if any(pd.isna(row.get(column)) for column in required_epoch_columns):
-                bad.append(row_index)
-        return df.drop(bad).reset_index(drop=True)
+        return df.loc[df.apply(valid_comet_sorcha_row, axis=1)].reset_index(drop=True)
 
     return df[df["Principal_desig"].isin(ids)].copy().reset_index(drop=True)
 
