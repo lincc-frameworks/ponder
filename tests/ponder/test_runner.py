@@ -81,7 +81,9 @@ def test_chunk_is_complete_allows_marked_zero_output_success(tmp_path):
         output_path=tmp_path / "chunk.csv",
     )
 
-    chunk.done_path.write_text(json.dumps({"output_exists": False, "ew_output_exists": False}))
+    chunk.done_path.write_text(
+        json.dumps({"output_exists": False, "ew_output_exists": False})
+    )
 
     assert runner.chunk_is_complete(chunk)
 
@@ -125,7 +127,9 @@ def test_mpc_catalog_snapshot_gzips_source_and_preserves_row_numbers(tmp_path):
     with gzip.open(snapshot_path, "rt") as file:
         assert json.load(file) == objects
 
-    loaded = runner.annotate_catalog_row_numbers(runner.read_json_catalog(snapshot_path))
+    loaded = runner.annotate_catalog_row_numbers(
+        runner.read_json_catalog(snapshot_path)
+    )
     assert [obj[runner.CATALOG_ROW_COLUMN] for obj in loaded] == [0, 1]
 
 
@@ -155,9 +159,9 @@ def test_audit_combined_outputs_reports_missing_object_timestamps(tmp_path):
 
     final_output = tmp_path / "results" / "2026-05-05_job_test.parquet"
     final_output.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame({"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2], "value": ["x", "y"]}).to_parquet(
-        final_output, index=False
-    )
+    pd.DataFrame(
+        {"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2], "value": ["x", "y"]}
+    ).to_parquet(final_output, index=False)
 
     pd.DataFrame({"ObjID": ["A", "B"], "fieldMJD_TAI": [1, 2]}).to_parquet(
         final_output.with_name(f"{final_output.stem}_ew.parquet"), index=False
@@ -230,7 +234,11 @@ def test_run_sorcha_chunks_resumes_completed_chunks(tmp_path, monkeypatch):
     )
     assert len(calls) == 2
     assert (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet").exists()
-    assert next((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_unchanged_and_new.parquet")).exists()
+    assert next(
+        (tmp_path / "results").glob(
+            "chunk_runs/*/2026-05-05_job_unchanged_and_new.parquet"
+        )
+    ).exists()
 
 
 def test_run_sorcha_chunks_context_digest_separates_resume_dirs(tmp_path, monkeypatch):
@@ -263,7 +271,12 @@ def test_run_sorcha_chunks_context_digest_separates_resume_dirs(tmp_path, monkey
 
     assert len(calls) == 2
     assert len(set(calls)) == 2
-    assert len(list((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_new.parquet"))) == 2
+    assert (
+        len(
+            list((tmp_path / "results").glob("chunk_runs/*/2026-05-05_job_new.parquet"))
+        )
+        == 2
+    )
     assert (tmp_path / "results" / "2026-05-05_job_new.parquet").exists()
 
 
@@ -280,7 +293,9 @@ def test_run_sorcha_chunks_can_run_only_selected_chunks(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
     orbs = pd.DataFrame({"ObjID": ["A", "B", "C", "D"], "a": [1.0, 2.0, 3.0, 4.0]})
-    phys = pd.DataFrame({"ObjID": ["A", "B", "C", "D"], "H_r": [10.0, 11.0, 12.0, 13.0]})
+    phys = pd.DataFrame(
+        {"ObjID": ["A", "B", "C", "D"], "H_r": [10.0, 11.0, 12.0, 13.0]}
+    )
 
     completed = runner.run_sorcha_chunks(
         orbs,
@@ -297,7 +312,9 @@ def test_run_sorcha_chunks_can_run_only_selected_chunks(tmp_path, monkeypatch):
     assert completed is False
     assert len(calls) == 1
     assert calls[0].startswith("chunk_00001")
-    assert not (tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet").exists()
+    assert not (
+        tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet"
+    ).exists()
 
 
 def test_read_ignore_ids_and_filter_objects(tmp_path):
@@ -321,7 +338,9 @@ def test_extract_new_pointings_creates_empty_observations_table(tmp_path):
     source_db = tmp_path / "source.db"
     out_db = tmp_path / "new_pointings.db"
     with sqlite3.connect(source_db) as con:
-        con.execute("CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)")
+        con.execute(
+            "CREATE TABLE observations (observationId INTEGER, observationStartMJD REAL)"
+        )
         con.execute("INSERT INTO observations VALUES (1, 10.0)")
 
     count = runner.extract_new_pointings(source_db, 10.0, out_db)
@@ -346,7 +365,26 @@ def _asteroid(principal_desig, e=0.1):
     }
 
 
-def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_path, monkeypatch):
+def test_neo_state_and_resume_context_are_separate_from_asteroids(tmp_path):
+    db_path = tmp_path / "pointings.db"
+    config_path = tmp_path / "config.ini"
+    db_path.write_bytes(b"db")
+    config_path.write_text("[INPUT]\n")
+
+    asteroid_state = runner.state_files_for_run(db_path, comet=False)
+    neo_state = runner.state_files_for_run(db_path, comet=False, neo=True)
+    asteroid_context = runner.run_context_digest(db_path, config_path, comet=False)
+    neo_context = runner.run_context_digest(db_path, config_path, comet=False, neo=True)
+
+    assert asteroid_state != neo_state
+    assert "asteroids" in asteroid_state[0].name
+    assert "neos" in neo_state[0].name
+    assert asteroid_context != neo_context
+
+
+def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     db_path = tmp_path / "pointings.db"
     object_path = tmp_path / "objects.json"
@@ -377,7 +415,9 @@ def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_p
         calls.append(Path(db))
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ObjID,fieldMJD_TAI\nA,10\n")
-        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nA,10\n")
+        output.with_name(f"{output.stem}_ew.csv").write_text(
+            "ObjID,fieldMJD_TAI\nA,10\n"
+        )
 
     monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
 
@@ -391,7 +431,9 @@ def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_p
     )
 
     assert calls == [db_path]
-    assert json.loads(hashes_file.read_text()) == runner.object_hashes(runner.read_json_catalog(object_path))
+    assert json.loads(hashes_file.read_text()) == runner.object_hashes(
+        runner.read_json_catalog(object_path)
+    )
 
 
 def test_run_ponder_new_objects_mode_ignores_orbit_updates_and_preserves_last_mjd(
@@ -423,7 +465,9 @@ def test_run_ponder_new_objects_mode_ignores_orbit_updates_and_preserves_last_mj
         calls.append((Path(db), input_rows["ObjID"].tolist()))
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ObjID,fieldMJD_TAI\nC,10\n")
-        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nC,10\n")
+        output.with_name(f"{output.stem}_ew.csv").write_text(
+            "ObjID,fieldMJD_TAI\nC,10\n"
+        )
 
     monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
 
@@ -483,10 +527,12 @@ def test_run_ponder_auto_mode_keeps_default_incremental_behavior(tmp_path, monke
         calls.append((Path(db).name, input_rows["ObjID"].tolist()))
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
-            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},10\n" for obj_id in input_rows["ObjID"])
+            "ObjID,fieldMJD_TAI\n"
+            + "".join(f"{obj_id},10\n" for obj_id in input_rows["ObjID"])
         )
         output.with_name(f"{output.stem}_ew.csv").write_text(
-            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},10\n" for obj_id in input_rows["ObjID"])
+            "ObjID,fieldMJD_TAI\n"
+            + "".join(f"{obj_id},10\n" for obj_id in input_rows["ObjID"])
         )
 
     monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
@@ -509,7 +555,9 @@ def test_run_ponder_auto_mode_keeps_default_incremental_behavior(tmp_path, monke
     assert json.loads(hashes_file.read_text()) == runner.object_hashes(objects)
 
 
-def test_run_ponder_skips_unchanged_objects_when_no_new_pointings(tmp_path, monkeypatch):
+def test_run_ponder_skips_unchanged_objects_when_no_new_pointings(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     db_path = tmp_path / "pointings.db"
     object_path = tmp_path / "objects.json"
@@ -582,7 +630,9 @@ def test_run_ponder_ignores_legacy_global_state_files(tmp_path, monkeypatch):
         calls.append(Path(db))
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ObjID,fieldMJD_TAI\nA,10\n")
-        output.with_name(f"{output.stem}_ew.csv").write_text("ObjID,fieldMJD_TAI\nA,10\n")
+        output.with_name(f"{output.stem}_ew.csv").write_text(
+            "ObjID,fieldMJD_TAI\nA,10\n"
+        )
 
     monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
 
@@ -641,7 +691,9 @@ def test_failed_chunks_write_summary_and_catalog_rows(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
     orbs = pd.DataFrame({"ObjID": ["A", "B", "C", "D"], "a": [1.0, 2.0, 3.0, 4.0]})
-    phys = pd.DataFrame({"ObjID": ["A", "B", "C", "D"], "H_r": [10.0, 11.0, 12.0, 13.0]})
+    phys = pd.DataFrame(
+        {"ObjID": ["A", "B", "C", "D"], "H_r": [10.0, 11.0, 12.0, 13.0]}
+    )
     catalog_rows = pd.DataFrame(
         {
             "Principal_desig": ["A", "B", "C", "D"],
@@ -666,7 +718,9 @@ def test_failed_chunks_write_summary_and_catalog_rows(tmp_path, monkeypatch):
         )
 
     failure_paths = list((tmp_path / "results").glob("chunk_runs/*/failures.csv"))
-    catalog_paths = list((tmp_path / "results").glob("chunk_runs/*/failed_catalog_rows.csv"))
+    catalog_paths = list(
+        (tmp_path / "results").glob("chunk_runs/*/failed_catalog_rows.csv")
+    )
     assert len(failure_paths) == 1
     assert len(catalog_paths) == 1
 
@@ -692,7 +746,9 @@ def test_failed_chunks_can_run_debug_subchunks(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "run_sorcha", fake_run_sorcha)
     orbs = pd.DataFrame({"ObjID": ["A", "B", "C", "D"], "a": [1.0, 2.0, 3.0, 4.0]})
-    phys = pd.DataFrame({"ObjID": ["A", "B", "C", "D"], "H_r": [10.0, 11.0, 12.0, 13.0]})
+    phys = pd.DataFrame(
+        {"ObjID": ["A", "B", "C", "D"], "H_r": [10.0, 11.0, 12.0, 13.0]}
+    )
     catalog_rows = pd.DataFrame({"Principal_desig": ["A", "B", "C", "D"]})
 
     with pytest.raises(RuntimeError, match="chunk 00001"):
@@ -710,8 +766,14 @@ def test_failed_chunks_can_run_debug_subchunks(tmp_path, monkeypatch):
             isolate_failing_rows=False,
         )
 
-    report_paths = list((tmp_path / "results").glob("chunk_runs/*/debug/subchunk_debug_report.csv"))
-    catalog_paths = list((tmp_path / "results").glob("chunk_runs/*/debug/failed_subchunk_catalog_rows.csv"))
+    report_paths = list(
+        (tmp_path / "results").glob("chunk_runs/*/debug/subchunk_debug_report.csv")
+    )
+    catalog_paths = list(
+        (tmp_path / "results").glob(
+            "chunk_runs/*/debug/failed_subchunk_catalog_rows.csv"
+        )
+    )
     assert len(report_paths) == 1
     assert len(catalog_paths) == 1
 
@@ -734,7 +796,9 @@ def test_failed_chunks_default_to_isolation_and_salvage_outputs(tmp_path, monkey
             raise TimeoutError("bad row")
 
         rows = input_rows["ObjID"].tolist()
-        output.write_text("ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in rows))
+        output.write_text(
+            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in rows)
+        )
         output.with_name(f"{output.stem}_ew.csv").write_text(
             "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in rows)
         )
@@ -781,9 +845,13 @@ def test_rerun_resumes_parent_failures_into_debug_salvage(tmp_path, monkeypatch)
         output.parent.mkdir(parents=True, exist_ok=True)
         if "D" in input_rows["ObjID"].tolist():
             raise TimeoutError("bad row")
-        output.write_text("ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"]))
+        output.write_text(
+            "ObjID,fieldMJD_TAI\n"
+            + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"])
+        )
         output.with_name(f"{output.stem}_ew.csv").write_text(
-            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"])
+            "ObjID,fieldMJD_TAI\n"
+            + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"])
         )
 
     monkeypatch.setattr(runner, "run_sorcha", first_run_sorcha)
@@ -814,9 +882,13 @@ def test_rerun_resumes_parent_failures_into_debug_salvage(tmp_path, monkeypatch)
         output.parent.mkdir(parents=True, exist_ok=True)
         if "D" in input_rows["ObjID"].tolist():
             raise TimeoutError("bad row")
-        output.write_text("ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"]))
+        output.write_text(
+            "ObjID,fieldMJD_TAI\n"
+            + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"])
+        )
         output.with_name(f"{output.stem}_ew.csv").write_text(
-            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"])
+            "ObjID,fieldMJD_TAI\n"
+            + "".join(f"{obj_id},1\n" for obj_id in input_rows["ObjID"])
         )
 
     monkeypatch.setattr(runner, "run_sorcha", second_run_sorcha)
@@ -852,7 +924,9 @@ def test_salvage_skips_successful_debug_ranges_without_outputs(tmp_path, monkeyp
         if obj_ids == ["C"]:
             return
 
-        output.write_text("ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in obj_ids))
+        output.write_text(
+            "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in obj_ids)
+        )
         output.with_name(f"{output.stem}_ew.csv").write_text(
             "ObjID,fieldMJD_TAI\n" + "".join(f"{obj_id},1\n" for obj_id in obj_ids)
         )
@@ -994,7 +1068,13 @@ def test_isolate_failing_rows_finds_single_bad_row(tmp_path, monkeypatch):
     assert failing_rows["Principal_desig"].tolist() == ["C"]
     assert failing_rows["failure_input_row"].tolist() == [2]
     assert failing_rows["failure_row_count"].tolist() == [1]
-    for column in ["started_at", "completed_at", "duration_seconds", "sorcha_seconds", "resumed"]:
+    for column in [
+        "started_at",
+        "completed_at",
+        "duration_seconds",
+        "sorcha_seconds",
+        "resumed",
+    ]:
         assert column in isolation.columns
     assert {"debug_level", "row_count", "mean_sorcha_seconds"}.issubset(timing.columns)
 

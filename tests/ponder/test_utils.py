@@ -9,7 +9,9 @@ from ponder.utils import (
     filter_orbit_objects,
     format_rubin_filter_list,
     get_current_orbits,
+    keep_neo_object,
     keep_mpcorb_object,
+    mpcorb_perihelion_distance,
     mpcorb_observation_arc_at_least,
     mpcorb_to_sorcha_inputs,
     rubin_band,
@@ -50,6 +52,19 @@ def test_filter_orbit_objects_leaves_comets_unchanged():
 
     assert filter_orbit_objects(objects, comet=True) == objects
     assert filter_orbit_objects(objects, comet=False) == []
+
+
+def test_neo_filter_uses_strict_standard_perihelion_cut():
+    assert keep_neo_object({"a": 2.0, "e": 0.4})
+    assert not keep_neo_object({"a": 1.3, "e": 0.0})
+    assert not keep_neo_object({"a": 2.0, "e": 0.3})
+
+
+def test_neo_filter_rejects_invalid_or_missing_elliptic_elements():
+    assert mpcorb_perihelion_distance({"a": 2.0}) is None
+    assert mpcorb_perihelion_distance({"a": "bad", "e": 0.5}) is None
+    assert mpcorb_perihelion_distance({"a": 2.0, "e": 1.0}) is None
+    assert not keep_neo_object({"a": 2.0, "e": float("nan")})
 
 
 def _assert_default_sorcha_phys_columns(phys):
@@ -152,7 +167,10 @@ def test_filter_list_uses_rubin_filter_order():
 def test_physical_filter_list_uses_rubin_filter_order():
     values = ["z_03", "r_03", "u_02", "g_01", "i_06", "y_04"]
 
-    assert format_rubin_filter_list(values, normalize=False) == "u_02,g_01,r_03,i_06,z_03,y_04"
+    assert (
+        format_rubin_filter_list(values, normalize=False)
+        == "u_02,g_01,r_03,i_06,z_03,y_04"
+    )
 
 
 class MockResponse:

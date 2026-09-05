@@ -1,5 +1,6 @@
 import gzip
 import hashlib
+import math
 import re
 import sqlite3
 
@@ -27,6 +28,7 @@ MPCCOM_URL = "https://www.minorplanetcenter.net/Extended_Files/allcometels.json.
 MPCORB_SEMIMAJOR_AXIS_LIMIT_AU = 30.0
 MPCORB_UNCERTAINTY_CODE_LIMIT = 6
 MPCORB_OBSERVATION_ARC_LIMIT_DAYS = 3.0
+MPCORB_NEO_PERIHELION_LIMIT_AU = 1.3
 SORCHA_DEFAULT_GS = 0.15
 SORCHA_DEFAULT_COLOR_OFFSETS = {
     "u-r": 1.8,
@@ -139,7 +141,9 @@ def _arc_length_days(obj):
     return _float_or_none(arc_length)
 
 
-def mpcorb_observation_arc_at_least(obj, minimum_days=MPCORB_OBSERVATION_ARC_LIMIT_DAYS):
+def mpcorb_observation_arc_at_least(
+    obj, minimum_days=MPCORB_OBSERVATION_ARC_LIMIT_DAYS
+):
     if _has_arc_years(obj):
         return True
 
@@ -155,10 +159,41 @@ def keep_mpcorb_object(obj):
         return True
 
     uncertainty_code = _float_or_none(obj.get("U"))
-    if uncertainty_code is not None and uncertainty_code <= MPCORB_UNCERTAINTY_CODE_LIMIT:
+    if (
+        uncertainty_code is not None
+        and uncertainty_code <= MPCORB_UNCERTAINTY_CODE_LIMIT
+    ):
         return True
 
     return mpcorb_observation_arc_at_least(obj)
+
+
+def mpcorb_perihelion_distance(obj):
+    """Return q = a(1-e) for a valid elliptic MPCORB row, else None."""
+    semimajor_axis = _float_or_none(obj.get("a"))
+    eccentricity = _float_or_none(obj.get("e"))
+    if (
+        semimajor_axis is None
+        or eccentricity is None
+        or not math.isfinite(semimajor_axis)
+        or not math.isfinite(eccentricity)
+        or semimajor_axis <= 0.0
+        or eccentricity < 0.0
+        or eccentricity >= 1.0
+    ):
+        return None
+    return semimajor_axis * (1.0 - eccentricity)
+
+
+def keep_neo_object(obj, perihelion_limit_au=MPCORB_NEO_PERIHELION_LIMIT_AU):
+    """Return whether an MPCORB asteroid satisfies the standard NEO q cut."""
+    perihelion_distance = mpcorb_perihelion_distance(obj)
+    return perihelion_distance is not None and perihelion_distance < perihelion_limit_au
+
+
+def filter_neo_objects(objects):
+    """Select only NEOs while preserving the original MPCORB row dictionaries."""
+    return [obj for obj in objects if keep_neo_object(obj)]
 
 
 def filter_orbit_objects(objects, comet=False):
@@ -169,7 +204,9 @@ def filter_orbit_objects(objects, comet=False):
 
 def valid_comet_sorcha_row(obj):
     """Return whether an MPC comet row has every value required by Sorcha."""
-    return not any(_is_missing(obj.get(column)) for column in COMET_REQUIRED_INPUT_COLUMNS)
+    return not any(
+        _is_missing(obj.get(column)) for column in COMET_REQUIRED_INPUT_COLUMNS
+    )
 
 
 def add_default_sorcha_physical_columns(phys):
@@ -289,13 +326,17 @@ def comets_to_sorcha_inputs(comets_json, ids):
             bad.append(r)
             continue
 
-        epoch_strings.append(f"{int(row['Epoch_year'])}-{int(row['Epoch_month'])}-{int(row['Epoch_day'])}")
+        epoch_strings.append(
+            f"{int(row['Epoch_year'])}-{int(row['Epoch_month'])}-{int(row['Epoch_day'])}"
+        )
 
         # preserve fractional day for perihelion time precision
         tp_day_int = int(row["Day_of_perihelion"])
         tp_day_frac = row["Day_of_perihelion"] - tp_day_int
         year_str = f"{int(row['Year_of_perihelion']):04d}"
-        tp_strings.append((f"{year_str}-{int(row['Month_of_perihelion'])}-{tp_day_int}", tp_day_frac))
+        tp_strings.append(
+            (f"{year_str}-{int(row['Month_of_perihelion'])}-{tp_day_int}", tp_day_frac)
+        )
 
     df = df.drop(bad).reset_index(drop=True)
 
@@ -374,20 +415,31 @@ def extract_new_pointings(db_path, last_mjd, out_path):
 def invalid_observation_rows(db_path, sample_limit=5):
     con = sqlite3.connect(db_path)
     try:
-        columns = {row[1] for row in con.execute("PRAGMA table_info(observations)").fetchall()}
+        columns = {
+            row[1] for row in con.execute("PRAGMA table_info(observations)").fetchall()
+        }
         required = {"observationId", "fieldRA", "fieldDec"}
         missing = sorted(required - columns)
         if missing:
-            raise ValueError(f"observations table is missing required columns: {missing}")
+            raise ValueError(
+                f"observations table is missing required columns: {missing}"
+            )
 
-        df = pd.read_sql_query("SELECT observationId, fieldRA, fieldDec FROM observations", con)
+        df = pd.read_sql_query(
+            "SELECT observationId, fieldRA, fieldDec FROM observations", con
+        )
     finally:
         con.close()
 
     ra = pd.to_numeric(df["fieldRA"], errors="coerce")
     dec = pd.to_numeric(df["fieldDec"], errors="coerce")
     invalid = df.loc[
-        ra.isna() | dec.isna() | (ra < 0.0) | (ra >= 360.0) | (dec < -90.0) | (dec > 90.0)
+        ra.isna()
+        | dec.isna()
+        | (ra < 0.0)
+        | (ra >= 360.0)
+        | (dec < -90.0)
+        | (dec > 90.0)
     ]
     return len(df), invalid.head(sample_limit)
 

@@ -14,7 +14,11 @@ def test_download_orbits_without_db_skips_analysis(monkeypatch, tmp_path, capsys
     def fake_run_ponder(*args, **kwargs):
         raise AssertionError("run_ponder should not be called without --db")
 
-    monkeypatch.setattr(sys, "argv", ["ponder", "--work-dir", str(tmp_path), "--download_orbits", "--comet"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["ponder", "--work-dir", str(tmp_path), "--download_orbits", "--comet"],
+    )
     monkeypatch.setattr(ponder_main, "get_current_orbits", fake_get_current_orbits)
     monkeypatch.setattr(ponder_main, "run_ponder", fake_run_ponder)
 
@@ -57,3 +61,31 @@ def test_update_mode_is_passed_to_run_ponder(monkeypatch, tmp_path):
     ponder_main.main()
 
     assert calls[0]["update_mode"] == "new-objects"
+
+
+def test_neo_mode_is_passed_to_run_ponder(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ponder",
+            "--db",
+            str(tmp_path / "pointings.db"),
+            "--orbits",
+            str(tmp_path / "objects.json"),
+            "--config",
+            str(tmp_path / "config.ini"),
+            "--neo",
+        ],
+    )
+    monkeypatch.setattr(
+        ponder_main, "run_ponder", lambda *args, **kwargs: calls.append(kwargs)
+    )
+
+    ponder_main.main()
+
+    assert calls[0]["neo"] is True
+    assert calls[0]["comet"] is False
+    assert "Running NEO analysis" in capsys.readouterr().out

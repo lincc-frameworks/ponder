@@ -13,19 +13,34 @@ from .utils import get_current_orbits
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Ponder comet analysis")
+    parser = argparse.ArgumentParser(description="Run Ponder small-body analysis")
     parser.add_argument("--db", type=Path, help="Path to the database file")
     parser.add_argument("--orbits", type=Path, help="Path to the orbits JSON file")
     parser.add_argument("--config", type=Path, help="Path to the configuration file")
-    parser.add_argument("--comet", action="store_true", help="Whether to run comet analysis")
-    parser.add_argument(
-        "--work-dir", type=Path, default=Path.cwd() / "work", help="Directory to store intermediate files"
+    population = parser.add_mutually_exclusive_group()
+    population.add_argument(
+        "--comet", action="store_true", help="Run the MPC comet population"
+    )
+    population.add_argument(
+        "--neo",
+        action="store_true",
+        help="Run only MPCORB asteroids with q = a(1-e) < 1.3 au",
     )
     parser.add_argument(
-        "--download_orbits", action="store_true", help="Whether to download the latest orbits from MPC"
+        "--work-dir",
+        type=Path,
+        default=Path.cwd() / "work",
+        help="Directory to store intermediate files",
     )
     parser.add_argument(
-        "--no-filter-orbits", action="store_true", help="Disable the default orbit-catalog filter"
+        "--download_orbits",
+        action="store_true",
+        help="Whether to download the latest orbits from MPC",
+    )
+    parser.add_argument(
+        "--no-filter-orbits",
+        action="store_true",
+        help="Disable the default orbit-catalog filter",
     )
     parser.add_argument(
         "--update-mode",
@@ -108,12 +123,16 @@ def main():
         return
     if args.db is None:
         if args.download_orbits:
-            print(f"No database supplied; downloaded orbits to {orbit_path}. Skipping Ponder analysis.")
+            print(
+                f"No database supplied; downloaded orbits to {orbit_path}. Skipping Ponder analysis."
+            )
         else:
             print("Error: Must provide --db to run Ponder analysis")
         return
     if args.comet:
         print("Running comet analysis")
+    elif args.neo:
+        print("Running NEO analysis")
     else:
         print("Running asteroid analysis")
     run_ponder(
@@ -133,6 +152,7 @@ def main():
         force_debug_chunking=args.force_debug_chunking,
         isolate_failing_rows=args.isolate_failing_rows,
         update_mode=args.update_mode,
+        neo=args.neo,
     )
 
 

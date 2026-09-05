@@ -339,3 +339,17 @@ Notes:
    that a set of tests will be run prior to completing a local commit. For more
    information, see the Python Project Template documentation on 
    [pre-commit](https://lincc-ppt.readthedocs.io/en/latest/practices/precommit.html)
+
+
+## NEO-only runs
+
+Use `--neo` with an MPCORB catalog to select asteroids with the standard
+`q = a(1-e) < 1.3 au` criterion. The population cut is always applied;
+`--no-filter-orbits` disables only Ponder's additional orbit-quality filter. NEO state
+and chunk-resume digests use a separate `neos` namespace, so they cannot collide
+with full-asteroid or comet runs against the same pointing database.
+
+```bash
+ponder --neo --db pointings.db --orbits mpcorb_extended.json --config sorcha.ini \
+  --no-filter-orbits
+```

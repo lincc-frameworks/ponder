@@ -61,13 +61,26 @@ def object_hashes(objects):
 def _state_path_token(path):
     """Return a filesystem-safe label for run state files."""
     stem = Path(path).stem or "pointings"
-    safe = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in stem)
+    safe = "".join(
+        char if char.isalnum() or char in ("-", "_") else "_" for char in stem
+    )
     return safe[:80] or "pointings"
 
 
-def state_files_for_run(db_path, comet):
+def object_mode(comet, neo=False):
+    """Return the persistent namespace for an object population."""
+    if comet and neo:
+        raise ValueError("A Ponder run cannot be both comet and NEO mode")
+    if comet:
+        return "comets"
+    if neo:
+        return "neos"
+    return "asteroids"
+
+
+def state_files_for_run(db_path, comet, neo=False):
     """Scope incremental state to the pointing DB and object mode."""
-    mode = "comets" if comet else "asteroids"
+    mode = object_mode(comet, neo)
     db_path = Path(db_path).expanduser().resolve()
     digest = hashlib.sha256(f"{db_path}|{mode}".encode()).hexdigest()[:12]
     stem = f"{_state_path_token(db_path)}_{mode}_{digest}"
@@ -85,9 +98,9 @@ def path_fingerprint(path):
     return f"{path}:{marker}"
 
 
-def run_context_digest(db_path, config_path, comet, **metadata):
+def run_context_digest(db_path, config_path, comet, neo=False, **metadata):
     """Build a resume namespace for chunks that depend on DB/config context."""
-    mode = "comets" if comet else "asteroids"
+    mode = object_mode(comet, neo)
     parts = [
         f"mode={mode}",
         f"db={path_fingerprint(db_path)}",
@@ -186,7 +199,9 @@ def run_sorcha(orbits, physparams, output, db, config, timeout=None):
         returncode = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         _terminate_process_group(proc)
-        raise TimeoutError(f"Sorcha timed out after {timeout} seconds for {output.stem}") from exc
+        raise TimeoutError(
+            f"Sorcha timed out after {timeout} seconds for {output.stem}"
+        ) from exc
 
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, command)
@@ -215,7 +230,11 @@ def build_id_set_inputs(objects, ids, job_name, comet):
             f"{len(catalog_rows)} != {len(orbs)}"
         )
 
-    return orbs.reset_index(drop=True), phys.reset_index(drop=True), catalog_rows.reset_index(drop=True)
+    return (
+        orbs.reset_index(drop=True),
+        phys.reset_index(drop=True),
+        catalog_rows.reset_index(drop=True),
+    )
 
 
 def catalog_rows_for_sorcha_inputs(objects, ids, comet):
@@ -243,13 +262,22 @@ def read_ignore_ids(ignore_objects_path=None, ignore_object_ids=None):
         df = pd.read_csv(path, dtype=str)
         # Prefer known MPC/Sorcha ID columns, but accept a one-column ad hoc CSV
         # so manual ignore lists do not need a strict header.
-        for column in ["ObjID", "Principal_desig", "Provisional_packed_desig", "Designation_and_name"]:
+        for column in [
+            "ObjID",
+            "Principal_desig",
+            "Provisional_packed_desig",
+            "Designation_and_name",
+        ]:
             if column in df.columns:
-                ids.update(value.strip() for value in df[column].dropna() if value.strip())
+                ids.update(
+                    value.strip() for value in df[column].dropna() if value.strip()
+                )
                 return ids
         if len(df.columns) > 0:
             first_column = df.columns[0]
-            ids.update(value.strip() for value in df[first_column].dropna() if value.strip())
+            ids.update(
+                value.strip() for value in df[first_column].dropna() if value.strip()
+            )
         return ids
 
     for line in path.read_text().splitlines():
@@ -291,7 +319,9 @@ def _catalog_snapshot_stem(path):
     for suffix in [".gz", ".json"]:
         if name.lower().endswith(suffix):
             name = name[: -len(suffix)]
-    safe = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in name)
+    safe = "".join(
+        char if char.isalnum() or char in ("-", "_") else "_" for char in name
+    )
     return safe or "mpc_catalog"
 
 
@@ -316,7 +346,9 @@ def write_mpc_catalog_snapshot(object_path, results_dir, timestamp):
             digest.update(block)
             dst.write(block)
 
-    snapshot_path = snapshot_dir / f"{timestamp_prefix}_{stem}_{digest.hexdigest()[:12]}.json.gz"
+    snapshot_path = (
+        snapshot_dir / f"{timestamp_prefix}_{stem}_{digest.hexdigest()[:12]}.json.gz"
+    )
     if snapshot_path.exists():
         tmp_path.unlink()
     else:
@@ -392,10 +424,13 @@ def plan_debug_subchunks(parent_chunk, subchunk_size):
     # failed range can be tied back to the top-level chunk report.
     debug_work_dir = parent_chunk.orbits_path.parent / "debug"
     debug_results_dir = parent_chunk.output_path.parent / "debug"
-    for index, row_start in enumerate(range(parent_chunk.row_start, parent_chunk.row_end, subchunk_size)):
+    for index, row_start in enumerate(
+        range(parent_chunk.row_start, parent_chunk.row_end, subchunk_size)
+    ):
         row_end = min(row_start + subchunk_size, parent_chunk.row_end)
         chunk_stem = (
-            f"chunk_{parent_chunk.index:05d}_debug_{index:04d}_" f"rows_{row_start:07d}_{row_end - 1:07d}"
+            f"chunk_{parent_chunk.index:05d}_debug_{index:04d}_"
+            f"rows_{row_start:07d}_{row_end - 1:07d}"
         )
         chunks.append(
             SorchaChunk(
@@ -435,7 +470,9 @@ def write_chunk_inputs(chunk, orbs, phys):
     chunk.orbits_path.parent.mkdir(parents=True, exist_ok=True)
     chunk.physparams_path.parent.mkdir(parents=True, exist_ok=True)
     orbs.iloc[chunk.row_start : chunk.row_end].to_csv(chunk.orbits_path, index=False)
-    phys.iloc[chunk.row_start : chunk.row_end].to_csv(chunk.physparams_path, index=False)
+    phys.iloc[chunk.row_start : chunk.row_end].to_csv(
+        chunk.physparams_path, index=False
+    )
     return perf_counter() - started
 
 
@@ -499,7 +536,9 @@ def normalize_chunk_run_metadata(chunk, marker, status, resumed, worker_count):
     """Read old or current marker files into the current report schema."""
     error = marker.get("error", "")
     input_write_seconds = float(marker.get("input_write_seconds", 0.0) or 0.0)
-    sorcha_seconds = float(marker.get("sorcha_seconds", marker.get("duration_seconds", 0.0)) or 0.0)
+    sorcha_seconds = float(
+        marker.get("sorcha_seconds", marker.get("duration_seconds", 0.0)) or 0.0
+    )
     metadata = chunk_run_metadata(
         chunk,
         status,
@@ -540,7 +579,9 @@ def result_from_failed_chunk(chunk, worker_count):
         resumed=True,
         worker_count=worker_count,
     )
-    return ChunkRunResult(chunk=chunk, ok=False, error=metadata.get("error", ""), metadata=metadata)
+    return ChunkRunResult(
+        chunk=chunk, ok=False, error=metadata.get("error", ""), metadata=metadata
+    )
 
 
 def forced_chunk_failure(chunk, worker_count, reason="Forced debug chunking"):
@@ -572,7 +613,9 @@ def write_chunk_manifest(
         "chunk_size": chunk_size,
         "digest": digest,
         "context_digest": context_digest or "",
-        "catalog_snapshot_path": "" if catalog_snapshot_path is None else str(catalog_snapshot_path),
+        "catalog_snapshot_path": ""
+        if catalog_snapshot_path is None
+        else str(catalog_snapshot_path),
         "chunks": [
             {
                 "index": chunk.index,
@@ -616,18 +659,23 @@ def write_failure_reports(chunks, failures, catalog_rows):
 
     pd.DataFrame(failure_rows).to_csv(failure_path, index=False)
     if failed_catalog_rows:
-        pd.concat(failed_catalog_rows, ignore_index=True).to_csv(catalog_path, index=False)
-    else:
-        pd.DataFrame(columns=["chunk", "chunk_row_start", "chunk_row_end", "chunk_error"]).to_csv(
+        pd.concat(failed_catalog_rows, ignore_index=True).to_csv(
             catalog_path, index=False
         )
+    else:
+        pd.DataFrame(
+            columns=["chunk", "chunk_row_start", "chunk_row_end", "chunk_error"]
+        ).to_csv(catalog_path, index=False)
 
     return failure_path, catalog_path
 
 
 def debug_report_paths(chunks):
     results_dir = chunks[0].output_path.parent
-    return results_dir / "subchunk_debug_report.csv", results_dir / "failed_subchunk_catalog_rows.csv"
+    return (
+        results_dir / "subchunk_debug_report.csv",
+        results_dir / "failed_subchunk_catalog_rows.csv",
+    )
 
 
 def debug_dir_for_chunk(chunk):
@@ -674,7 +722,9 @@ def write_debug_subchunk_reports(chunks, results, parent_by_subchunk, catalog_ro
 
     pd.DataFrame(report_rows).to_csv(report_path, index=False)
     if failed_catalog_rows:
-        pd.concat(failed_catalog_rows, ignore_index=True).to_csv(catalog_path, index=False)
+        pd.concat(failed_catalog_rows, ignore_index=True).to_csv(
+            catalog_path, index=False
+        )
     else:
         pd.DataFrame(
             columns=[
@@ -756,7 +806,9 @@ def write_timing_summary(results, timing_path, wall_time_seconds=0.0):
     return timing_path
 
 
-def catalog_rows_for_results(results, catalog_rows, metadata_prefix, extra_metadata=None):
+def catalog_rows_for_results(
+    results, catalog_rows, metadata_prefix, extra_metadata=None
+):
     """Expand chunk results into catalog-row reports with prefixed metadata."""
     extra_metadata = extra_metadata or {}
     rows = []
@@ -778,7 +830,9 @@ def catalog_rows_for_results(results, catalog_rows, metadata_prefix, extra_metad
     for result in results:
         chunk = result.chunk
         chunk_rows = catalog_rows.iloc[chunk.row_start : chunk.row_end].copy()
-        chunk_rows.insert(0, f"{metadata_prefix}_input_row", range(chunk.row_start, chunk.row_end))
+        chunk_rows.insert(
+            0, f"{metadata_prefix}_input_row", range(chunk.row_start, chunk.row_end)
+        )
         for key in reversed(metadata_keys):
             if key in extra_metadata:
                 value = extra_metadata[key]
@@ -810,8 +864,12 @@ def write_isolation_reports(
     ) = isolation_report_paths(debug_dir)
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pd.DataFrame([result.metadata for result in sort_chunk_results(results)]).to_csv(report_path, index=False)
-    catalog_rows_for_results(failing_rows, catalog_rows, "failure").to_csv(failing_rows_path, index=False)
+    pd.DataFrame([result.metadata for result in sort_chunk_results(results)]).to_csv(
+        report_path, index=False
+    )
+    catalog_rows_for_results(failing_rows, catalog_rows, "failure").to_csv(
+        failing_rows_path, index=False
+    )
     catalog_rows_for_results(
         group_failures,
         catalog_rows,
@@ -827,13 +885,23 @@ def write_isolation_reports(
     group_columns = list(results[0].metadata.keys()) if results else []
     if "failure_type" not in group_columns:
         group_columns.append("failure_type")
-    pd.DataFrame(group_rows, columns=group_columns).to_csv(group_failures_path, index=False)
+    pd.DataFrame(group_rows, columns=group_columns).to_csv(
+        group_failures_path, index=False
+    )
     write_timing_summary(results, timing_path, wall_time_seconds=wall_time_seconds)
 
-    return report_path, failing_rows_path, group_failures_path, group_failure_catalog_path, timing_path
+    return (
+        report_path,
+        failing_rows_path,
+        group_failures_path,
+        group_failure_catalog_path,
+        timing_path,
+    )
 
 
-def run_sorcha_chunk(chunk, db, config, timeout, input_write_seconds=0.0, worker_count=1):
+def run_sorcha_chunk(
+    chunk, db, config, timeout, input_write_seconds=0.0, worker_count=1
+):
     chunk.output_path.parent.mkdir(parents=True, exist_ok=True)
     # Clear stale markers before each real attempt so a killed or failed retry
     # cannot leave both success and failure state behind.
@@ -845,7 +913,14 @@ def run_sorcha_chunk(chunk, db, config, timeout, input_write_seconds=0.0, worker
     started_at = _utc_now()
     started = perf_counter()
     try:
-        run_sorcha(chunk.orbits_path, chunk.physparams_path, chunk.output_path, db, config, timeout=timeout)
+        run_sorcha(
+            chunk.orbits_path,
+            chunk.physparams_path,
+            chunk.output_path,
+            db,
+            config,
+            timeout=timeout,
+        )
     except Exception as exc:
         sorcha_seconds = perf_counter() - started
         completed_at = _utc_now()
@@ -909,8 +984,14 @@ def run_debug_subchunks(
             parent_by_subchunk[subchunk] = parent_chunk
 
     completed = [chunk for chunk in debug_chunks if resume and chunk_is_complete(chunk)]
-    resumed_failures = [chunk for chunk in debug_chunks if resume and chunk.failed_path.exists()]
-    pending = [chunk for chunk in debug_chunks if chunk not in completed and chunk not in resumed_failures]
+    resumed_failures = [
+        chunk for chunk in debug_chunks if resume and chunk.failed_path.exists()
+    ]
+    pending = [
+        chunk
+        for chunk in debug_chunks
+        if chunk not in completed and chunk not in resumed_failures
+    ]
     # Treat failed markers as resumable too: the isolation pass can continue
     # from known-bad ranges without rerunning expensive parent failures.
     print(
@@ -924,7 +1005,9 @@ def run_debug_subchunks(
         input_write_seconds[chunk] = write_chunk_inputs(chunk, orbs, phys)
 
     results = [result_from_completed_chunk(chunk, workers) for chunk in completed]
-    results.extend(result_from_failed_chunk(chunk, workers) for chunk in resumed_failures)
+    results.extend(
+        result_from_failed_chunk(chunk, workers) for chunk in resumed_failures
+    )
     with tqdm(
         total=len(debug_chunks),
         initial=len(completed) + len(resumed_failures),
@@ -965,7 +1048,13 @@ def run_debug_subchunks(
 
     report_path, catalog_path = write_debug_subchunk_reports(
         debug_chunks,
-        sorted(results, key=lambda result: (parent_by_subchunk[result.chunk].index, result.chunk.index)),
+        sorted(
+            results,
+            key=lambda result: (
+                parent_by_subchunk[result.chunk].index,
+                result.chunk.index,
+            ),
+        ),
         parent_by_subchunk,
         catalog_rows,
     )
@@ -1029,16 +1118,26 @@ def split_isolation_chunk(chunk, level, start_index):
     return children
 
 
-def run_isolation_level(chunks, orbs, phys, db, config, workers, timeout=None, resume=True, level=1):
+def run_isolation_level(
+    chunks, orbs, phys, db, config, workers, timeout=None, resume=True, level=1
+):
     completed = [chunk for chunk in chunks if resume and chunk_is_complete(chunk)]
-    resumed_failures = [chunk for chunk in chunks if resume and chunk.failed_path.exists()]
-    pending = [chunk for chunk in chunks if chunk not in completed and chunk not in resumed_failures]
+    resumed_failures = [
+        chunk for chunk in chunks if resume and chunk.failed_path.exists()
+    ]
+    pending = [
+        chunk
+        for chunk in chunks
+        if chunk not in completed and chunk not in resumed_failures
+    ]
     input_write_seconds = {}
     for chunk in pending:
         input_write_seconds[chunk] = write_chunk_inputs(chunk, orbs, phys)
 
     results = [result_from_completed_chunk(chunk, workers) for chunk in completed]
-    results.extend(result_from_failed_chunk(chunk, workers) for chunk in resumed_failures)
+    results.extend(
+        result_from_failed_chunk(chunk, workers) for chunk in resumed_failures
+    )
     with tqdm(
         total=len(chunks),
         initial=len(completed) + len(resumed_failures),
@@ -1268,7 +1367,9 @@ def sort_output_chunks(chunks):
 
 def _debug_result_parent_node_ids(results):
     return {
-        result.metadata.get("parent_node_id") for result in results if result.metadata.get("parent_node_id")
+        result.metadata.get("parent_node_id")
+        for result in results
+        if result.metadata.get("parent_node_id")
     }
 
 
@@ -1311,11 +1412,15 @@ def isolated_failed_row_results(results):
 def salvage_output_chunks(chunks, failures, debug_results):
     failed_chunks = {result.chunk for result in failures}
     completed_parent_chunks = [
-        chunk for chunk in chunks if chunk not in failed_chunks and chunk_is_complete(chunk)
+        chunk
+        for chunk in chunks
+        if chunk not in failed_chunks and chunk_is_complete(chunk)
     ]
     # Replace failed parents with successful debug leaves so one isolated bad
     # row does not discard the rest of that parent's output.
-    return sort_output_chunks(completed_parent_chunks + successful_leaf_chunks(debug_results))
+    return sort_output_chunks(
+        completed_parent_chunks + successful_leaf_chunks(debug_results)
+    )
 
 
 def _first_present(columns, candidates):
@@ -1381,7 +1486,9 @@ def read_output_key_counts(paths, key_columns):
         return pd.DataFrame(columns=key_columns + ["row_count"]), row_count
 
     keys = pd.concat(frames, ignore_index=True)
-    counts = keys.groupby(key_columns, dropna=False).size().reset_index(name="row_count")
+    counts = (
+        keys.groupby(key_columns, dropna=False).size().reset_index(name="row_count")
+    )
     return counts, row_count
 
 
@@ -1393,7 +1500,9 @@ def catalog_row_lookup(catalog_rows):
     for column in OUTPUT_ID_COLUMNS:
         if column not in catalog_rows.columns:
             continue
-        lookup = catalog_rows[[column, CATALOG_ROW_COLUMN]].dropna(subset=[column]).copy()
+        lookup = (
+            catalog_rows[[column, CATALOG_ROW_COLUMN]].dropna(subset=[column]).copy()
+        )
         lookup.rename(columns={column: "object_id"}, inplace=True)
         lookup_frames.append(lookup)
 
@@ -1408,7 +1517,9 @@ def catalog_row_lookup(catalog_rows):
 def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
     """Compare chunk CSV rows against the combined CSV using schema-flexible keys."""
     paths_for_columns = list(source_paths) + [combined_path]
-    key_columns, id_column, timestamp_column = output_pair_key_columns(paths_for_columns)
+    key_columns, id_column, timestamp_column = output_pair_key_columns(
+        paths_for_columns
+    )
     summary = {
         "output_name": output_name,
         "combined_path": str(combined_path),
@@ -1429,7 +1540,9 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
         return summary, pd.DataFrame()
 
     source_counts, source_rows = read_output_key_counts(source_paths, key_columns)
-    combined_counts, combined_rows = read_output_key_counts([combined_path], key_columns)
+    combined_counts, combined_rows = read_output_key_counts(
+        [combined_path], key_columns
+    )
     summary["source_rows"] = source_rows
     summary["combined_rows"] = combined_rows
     summary["source_pairs"] = len(source_counts)
@@ -1452,7 +1565,11 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
     missing["missing_count"] = missing["source_count"] - missing["combined_count"]
     missing.insert(0, "output_name", output_name)
     missing.insert(1, "object_id", missing[id_column].astype(str))
-    missing.insert(2, "timestamp", missing[timestamp_column].astype(str) if timestamp_column else "")
+    missing.insert(
+        2,
+        "timestamp",
+        missing[timestamp_column].astype(str) if timestamp_column else "",
+    )
     missing.insert(3, "id_column", id_column)
     missing.insert(4, "timestamp_column", timestamp_column)
 
@@ -1487,7 +1604,9 @@ def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None)
     for output_name, source_paths, combined_path in output_sets:
         # Audit detections and ephemerides independently because their column
         # names and zero-output behavior can diverge.
-        summary, missing = audit_output_pairs(source_paths, combined_path, output_name, catalog_rows)
+        summary, missing = audit_output_pairs(
+            source_paths, combined_path, output_name, catalog_rows
+        )
         audit_rows.append(summary)
         if not missing.empty:
             missing_frames.append(missing)
@@ -1573,7 +1692,9 @@ def run_sorcha_chunks(
         known_indices = {chunk.index for chunk in chunks}
         unknown_indices = sorted(only_chunks - known_indices)
         if unknown_indices:
-            raise ValueError(f"Unknown chunk index for {job_name}: {unknown_indices[0]}")
+            raise ValueError(
+                f"Unknown chunk index for {job_name}: {unknown_indices[0]}"
+            )
         chunks_to_run = [chunk for chunk in chunks if chunk.index in only_chunks]
     else:
         chunks_to_run = chunks
@@ -1608,7 +1729,9 @@ def run_sorcha_chunks(
             f"  Force debug chunking — {job_name}: selected={len(chunks_to_run)}, "
             f"debug size={debug_failed_chunk_size}, workers={workers}"
         )
-        parent_failures = [forced_chunk_failure(chunk, workers) for chunk in chunks_to_run]
+        parent_failures = [
+            forced_chunk_failure(chunk, workers) for chunk in chunks_to_run
+        ]
         run_debug_subchunks(
             orbs,
             phys,
@@ -1622,14 +1745,24 @@ def run_sorcha_chunks(
             resume=resume,
             isolate_failing_rows=isolate_failing_rows,
         )
-        print(f"  Completed forced debug chunking for {job_name}; skipping final combine and state update")
+        print(
+            f"  Completed forced debug chunking for {job_name}; skipping final combine and state update"
+        )
         return False
 
-    completed = [chunk for chunk in chunks_to_run if resume and chunk_is_complete(chunk)]
-    resumed_failures = [
-        chunk for chunk in chunks_to_run if resume and chunk not in completed and chunk.failed_path.exists()
+    completed = [
+        chunk for chunk in chunks_to_run if resume and chunk_is_complete(chunk)
     ]
-    pending = [chunk for chunk in chunks_to_run if chunk not in completed and chunk not in resumed_failures]
+    resumed_failures = [
+        chunk
+        for chunk in chunks_to_run
+        if resume and chunk not in completed and chunk.failed_path.exists()
+    ]
+    pending = [
+        chunk
+        for chunk in chunks_to_run
+        if chunk not in completed and chunk not in resumed_failures
+    ]
     final_output = chunks[0].output_path.parent / f"{time[:10]}_job_{job_name}.parquet"
     selected_text = ""
     if only_chunks is not None:
@@ -1681,7 +1814,9 @@ def run_sorcha_chunks(
                     progress.update(1)
 
     if failures:
-        failure_path, catalog_path = write_failure_reports(chunks, failures, catalog_rows)
+        failure_path, catalog_path = write_failure_reports(
+            chunks, failures, catalog_rows
+        )
         print(f"  Wrote failure report to {failure_path}")
         print(f"  Wrote failed catalog rows to {catalog_path}")
         debug_results = run_debug_subchunks(
@@ -1703,7 +1838,9 @@ def run_sorcha_chunks(
                 # Once every failed range is either isolated to a row or proven
                 # to be a group interaction, combine all successful leaves and
                 # leave the bad rows described in debug artifacts.
-                chunks_to_combine = salvage_output_chunks(chunks, failures, debug_results)
+                chunks_to_combine = salvage_output_chunks(
+                    chunks, failures, debug_results
+                )
                 if not chunks_to_combine:
                     raise RuntimeError(
                         f"Sorcha chunk failures for {job_name}; no successful chunks to combine"
@@ -1728,7 +1865,9 @@ def run_sorcha_chunks(
                         f"details in {missing_path}"
                     )
                 else:
-                    print("  Output audit — all chunk object/timestamp pairs are present in combined outputs")
+                    print(
+                        "  Output audit — all chunk object/timestamp pairs are present in combined outputs"
+                    )
                 visible, visible_ew, statuses = promote_combined_outputs(final_output)
                 print(
                     f"  Visible combined outputs — detections: {statuses['detections']} {visible}; "
@@ -1736,18 +1875,26 @@ def run_sorcha_chunks(
                 )
                 return True
 
-        failure_text = ", ".join(f"chunk {result.chunk.index:05d}: {result.error}" for result in failures)
+        failure_text = ", ".join(
+            f"chunk {result.chunk.index:05d}: {result.error}" for result in failures
+        )
         raise RuntimeError(f"Sorcha chunk failures for {job_name}: {failure_text}")
 
     if only_chunks is not None:
         # Selected chunk runs are diagnostic and must not advance incremental
         # state, since the full job has not necessarily completed.
-        print(f"  Completed selected chunks for {job_name}; skipping final combine and state update")
+        print(
+            f"  Completed selected chunks for {job_name}; skipping final combine and state update"
+        )
         return False
 
     if not all(chunk_is_complete(chunk) for chunk in chunks):
-        missing = [f"{chunk.index:05d}" for chunk in chunks if not chunk_is_complete(chunk)]
-        raise RuntimeError(f"Cannot combine {job_name}; incomplete chunks: {', '.join(missing)}")
+        missing = [
+            f"{chunk.index:05d}" for chunk in chunks if not chunk_is_complete(chunk)
+        ]
+        raise RuntimeError(
+            f"Cannot combine {job_name}; incomplete chunks: {', '.join(missing)}"
+        )
 
     combine_chunk_outputs(chunks, final_output)
     print(f"  Combined {len(chunks)} chunks into {final_output}")
@@ -1759,9 +1906,13 @@ def run_sorcha_chunks(
     )
     print(f"  Wrote output audit to {audit_path}")
     if missing_rows:
-        print(f"  Output audit — missing {missing_rows} chunk output rows; details in {missing_path}")
+        print(
+            f"  Output audit — missing {missing_rows} chunk output rows; details in {missing_path}"
+        )
     else:
-        print(f"  Output audit — all chunk object/timestamp pairs are present in combined outputs")
+        print(
+            f"  Output audit — all chunk object/timestamp pairs are present in combined outputs"
+        )
     visible, visible_ew, statuses = promote_combined_outputs(final_output)
     print(
         f"  Visible combined outputs — detections: {statuses['detections']} {visible}; "
@@ -1823,6 +1974,7 @@ def write_new_objects_report(
     config_path,
     catalog_snapshot_path,
     status,
+    neo=False,
     results_dir=None,
 ):
     """Write the object IDs selected by the new-objects-only update mode."""
@@ -1836,7 +1988,7 @@ def write_new_objects_report(
             "run_timestamp_utc": timestamp,
             "update_mode": UPDATE_MODE_NEW_OBJECTS,
             "object_id": object_id,
-            "object_mode": "comet" if comet else "asteroid",
+            "object_mode": "comet" if comet else ("neo" if neo else "asteroid"),
             "db_path": str(db_path),
             "config_path": str(config_path),
             "catalog_snapshot_path": str(catalog_snapshot_path),
@@ -1875,8 +2027,10 @@ def run_ponder(
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
     update_mode=UPDATE_MODE_AUTO,
+    neo=False,
 ):
     """Run Ponder on the given configs."""
+    object_mode(comet, neo)
     if update_mode not in UPDATE_MODES:
         raise ValueError(f"Unknown update mode: {update_mode}")
 
@@ -1888,9 +2042,13 @@ def run_ponder(
     if force_debug_chunking and selected_chunks is None:
         raise ValueError("--force-debug-chunking requires --only-chunks")
     if force_debug_chunking and debug_failed_chunk_size <= 0:
-        raise ValueError("--force-debug-chunking requires --debug-failed-chunk-size > 0")
+        raise ValueError(
+            "--force-debug-chunking requires --debug-failed-chunk-size > 0"
+        )
     if isolate_failing_rows and debug_failed_chunk_size <= 0:
-        raise ValueError("--isolate-failing-rows requires --debug-failed-chunk-size > 0")
+        raise ValueError(
+            "--isolate-failing-rows requires --debug-failed-chunk-size > 0"
+        )
 
     WORK_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -1903,17 +2061,28 @@ def run_ponder(
 
     # Persisted state is scoped by DB path and object mode so runs against a
     # different pointing database do not reuse old "last_mjd" or orbit hashes.
-    state_file, hashes_file = state_files_for_run(db_path, comet)
-    state = json.loads(state_file.read_text()) if state_file.exists() else {"last_mjd": 0.0}
+    state_file, hashes_file = state_files_for_run(db_path, comet, neo=neo)
+    state = (
+        json.loads(state_file.read_text()) if state_file.exists() else {"last_mjd": 0.0}
+    )
     prev_hashes = json.loads(hashes_file.read_text()) if hashes_file.exists() else {}
 
     objects = annotate_catalog_row_numbers(read_json_catalog(object_path))
     ignore_ids = read_ignore_ids(ignore_objects_path, ignore_object_ids)
     objects = filter_ignored_objects(objects, ignore_ids)
+    if neo:
+        unfiltered_count = len(objects)
+        objects = filter_neo_objects(objects)
+        print(
+            f"  NEO population filter (q < 1.3 au) — kept: {len(objects)}  "
+            f"removed: {unfiltered_count - len(objects)}"
+        )
     if filter_orbits:
         unfiltered_count = len(objects)
         objects = filter_orbit_objects(objects, comet=comet)
-        print(f"  Orbit filter — kept: {len(objects)}  removed: {unfiltered_count - len(objects)}")
+        print(
+            f"  Orbit filter — kept: {len(objects)}  removed: {unfiltered_count - len(objects)}"
+        )
 
     if not prev_hashes:
         print("  No baseline object hashes found; treating all objects as new")
@@ -1923,7 +2092,8 @@ def run_ponder(
     # -- load and diff inputs --
     new_ids, updated_ids, unchanged_ids = diff_objects(objects, prev_hashes)
     print(
-        f"  Objects — new: {len(new_ids)}  updated: {len(updated_ids)}  " f"unchanged: {len(unchanged_ids)}"
+        f"  Objects — new: {len(new_ids)}  updated: {len(updated_ids)}  "
+        f"unchanged: {len(unchanged_ids)}"
     )
 
     db_last_mjd = db_max_mjd(db_path)
@@ -1932,13 +2102,16 @@ def run_ponder(
         db_path,
         config_path,
         comet,
+        neo=neo,
         pointing_scope="full",
         db_max_mjd=db_last_mjd,
         db_row_count=total_pts,
     )
 
     if update_mode == UPDATE_MODE_NEW_OBJECTS:
-        print("  Update mode — new-objects; skipping new-pointing and updated-object jobs")
+        print(
+            "  Update mode — new-objects; skipping new-pointing and updated-object jobs"
+        )
         new_done = run_id_set(
             objects,
             new_ids,
@@ -1967,6 +2140,7 @@ def run_ponder(
             config_path,
             catalog_snapshot_path,
             report_status,
+            neo=neo,
         )
         print(f"  Wrote new-object report to {report_path}")
         if not new_done:
@@ -1994,6 +2168,7 @@ def run_ponder(
         db_path,
         config_path,
         comet,
+        neo=neo,
         pointing_scope="new",
         previous_last_mjd=state["last_mjd"],
         db_max_mjd=db_last_mjd,
