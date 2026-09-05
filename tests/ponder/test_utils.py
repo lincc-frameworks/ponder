@@ -107,7 +107,7 @@ def test_comets_to_sorcha_inputs_adds_all_filter_colour_offsets():
     _assert_default_sorcha_phys_columns(phys)
 
 
-def test_comets_to_sorcha_inputs_drops_rows_without_h():
+def test_comets_to_sorcha_inputs_preserves_rows_without_h():
     objects = [
         {
             "Designation_and_name": "C/2026 A1",
@@ -129,8 +129,12 @@ def test_comets_to_sorcha_inputs_drops_rows_without_h():
 
     orbits, phys = comets_to_sorcha_inputs(objects, ["C/2026 A1"])
 
-    assert orbits.empty
-    assert phys.empty
+    assert orbits["ObjID"].tolist() == ["C/2026 A1"]
+    assert phys["H_r"].isna().all()
+    del objects[0]["H"]
+    orbits, phys = comets_to_sorcha_inputs(objects, ["C/2026 A1"])
+    assert len(orbits) == 1
+    assert phys["H_r"].isna().all()
 
 
 def test_dp1_report_normalizes_physical_filter_to_band():

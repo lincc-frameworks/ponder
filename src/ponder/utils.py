@@ -42,7 +42,6 @@ COMET_REQUIRED_INPUT_COLUMNS = (
     "Year_of_perihelion",
     "Month_of_perihelion",
     "Day_of_perihelion",
-    "H",
 )
 RUBIN_FILTER_ORDER = ("u", "g", "r", "i", "z", "y")
 RUBIN_FILTER_BANDS = set(RUBIN_FILTER_ORDER)
@@ -338,7 +337,9 @@ def comets_to_sorcha_inputs(comets_json, ids):
     phys = pd.DataFrame(
         {
             "ObjID": orbs["ObjID"],
-            "H_r": df["H"].values,
+            # Brightness is not an orbit requirement. Preserve unknown H as
+            # NaN; geometry-only Sorcha configurations can retain these rows.
+            "H_r": pd.to_numeric(df.reindex(columns=["H"])["H"], errors="coerce").values,
         }
     )
     phys = add_default_sorcha_physical_columns(phys)
