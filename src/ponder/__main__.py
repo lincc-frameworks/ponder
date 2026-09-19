@@ -17,6 +17,11 @@ def main():
     parser.add_argument("--db", type=Path, help="Path to the database file")
     parser.add_argument("--orbits", type=Path, help="Path to the orbits JSON file")
     parser.add_argument("--config", type=Path, help="Path to the configuration file")
+    parser.add_argument(
+        "--physical-parameters",
+        type=Path,
+        help="Survey-specific Sorcha CSV keyed by ObjID; replaces default Rubin photometry",
+    )
     population = parser.add_mutually_exclusive_group()
     population.add_argument(
         "--comet", action="store_true", help="Run the MPC comet population"
@@ -153,6 +158,7 @@ def main():
         isolate_failing_rows=args.isolate_failing_rows,
         update_mode=args.update_mode,
         neo=args.neo,
+        physical_parameters_path=args.physical_parameters,
     )
 
 

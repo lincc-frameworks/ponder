@@ -32,6 +32,10 @@ For more information about the project template see the
 
 ## Running Ponder
 
+For Butler-free DEEP/DECam metadata and the experimental W84/VR geometry backend,
+see [DEEP geometry validation](docs/deep.md). It supports the same
+`--update-mode new-objects` baseline behavior.
+
 Ponder runs Sorcha against an orbit catalog and a pointing database:
 
 ```bash

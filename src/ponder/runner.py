@@ -1,9 +1,11 @@
 import gzip
+import configparser
 import hashlib
 import json
 import os
 import signal
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -175,9 +177,18 @@ def _terminate_process_group(proc):
 
 def run_sorcha(orbits, physparams, output, db, config, timeout=None):
     print(output.with_suffix(""))
+    settings = configparser.ConfigParser()
+    settings.read(config)
+    backend = settings.get("PONDER", "backend", fallback="sorcha")
+    if backend not in {"sorcha", "deep_geometry"}:
+        raise ValueError(f"Unknown Ponder backend: {backend}")
+    executable = (
+        [sys.executable, "-m", "ponder_tools.deep_ephemeris"]
+        if backend == "deep_geometry"
+        else ["sorcha", "run"]
+    )
     command = [
-        "sorcha",
-        "run",
+        *executable,
         "-c",
         str(config),
         "--ob",
@@ -1939,12 +1950,15 @@ def run_id_set(
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
+    physical_parameters=None,
 ):
     inputs = build_id_set_inputs(objects, ids, job_name, comet)
     if not inputs:
         return True
 
     orbs, phys, catalog_rows = inputs
+    if physical_parameters is not None:
+        phys = select_physical_parameters(physical_parameters, orbs["ObjID"])
     return run_sorcha_chunks(
         orbs,
         phys,
@@ -2028,6 +2042,8 @@ def run_ponder(
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
     update_mode=UPDATE_MODE_AUTO,
     neo=False,
+    *,
+    physical_parameters_path=None,
 ):
     """Run Ponder on the given configs."""
     object_mode(comet, neo)
@@ -2037,6 +2053,13 @@ def run_ponder(
     db_path = Path(db_path)
     object_path = Path(object_path)
     config_path = Path(config_path)
+    physical_parameters = None
+    physical_digest = None
+    if physical_parameters_path is not None:
+        physical_parameters_path = Path(physical_parameters_path)
+        physical_parameters = pd.read_csv(physical_parameters_path, dtype={"ObjID": str})
+        validate_physical_parameters(physical_parameters)
+        physical_digest = hashlib.sha256(physical_parameters_path.read_bytes()).hexdigest()
     sorcha_workers = max(1, sorcha_workers)
     selected_chunks = parse_chunk_indices(only_chunks)
     if force_debug_chunking and selected_chunks is None:
@@ -2052,6 +2075,10 @@ def run_ponder(
 
     WORK_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
+    if physical_parameters is not None:
+        physical_parameters.to_csv(
+            RESULTS_DIR / f"physical_parameters_{physical_digest[:16]}.csv", index=False
+        )
     validated_rows = validate_observations_db(db_path)
     print(f"  Pointing DB validation — rows: {validated_rows}")
 
@@ -2104,6 +2131,7 @@ def run_ponder(
         comet,
         neo=neo,
         pointing_scope="full",
+        **({"physical_parameters_sha256": physical_digest} if physical_digest else {}),
         db_max_mjd=db_last_mjd,
         db_row_count=total_pts,
     )
@@ -2130,6 +2158,7 @@ def run_ponder(
             debug_failed_chunk_size=debug_failed_chunk_size,
             force_debug_chunking=force_debug_chunking,
             isolate_failing_rows=isolate_failing_rows,
+            physical_parameters=physical_parameters,
         )
         report_status = "completed" if new_done else "partial"
         report_path = write_new_objects_report(
@@ -2170,6 +2199,7 @@ def run_ponder(
         comet,
         neo=neo,
         pointing_scope="new",
+        **({"physical_parameters_sha256": physical_digest} if physical_digest else {}),
         previous_last_mjd=state["last_mjd"],
         db_max_mjd=db_last_mjd,
         db_row_count=total_pts,
@@ -2194,6 +2224,7 @@ def run_ponder(
             debug_failed_chunk_size=debug_failed_chunk_size,
             force_debug_chunking=force_debug_chunking,
             isolate_failing_rows=isolate_failing_rows,
+            physical_parameters=physical_parameters,
         )
     else:
         unchanged_done = True
@@ -2218,6 +2249,7 @@ def run_ponder(
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
+        physical_parameters=physical_parameters,
     )
 
     updated_done = run_id_set(
@@ -2238,6 +2270,7 @@ def run_ponder(
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
+        physical_parameters=physical_parameters,
     )
 
     if not unchanged_done or not new_done or not updated_done:

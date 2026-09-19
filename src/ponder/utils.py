@@ -304,6 +304,28 @@ def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
     return orbs, phys
 
 
+def validate_physical_parameters(table):
+    """Validate a survey-specific Sorcha physical-parameter table."""
+    if "ObjID" not in table:
+        raise ValueError("Physical parameters require ObjID")
+    if table.ObjID.isna().any() or table.ObjID.astype(str).str.strip().eq("").any():
+        raise ValueError("Physical parameters contain missing object IDs")
+    if table.ObjID.duplicated().any():
+        raise ValueError("Physical parameters contain duplicate object IDs")
+    if not any(column.startswith("H_") for column in table):
+        raise ValueError("Physical parameters require a survey-specific H_<band> column")
+
+
+def select_physical_parameters(table, object_ids):
+    """Align explicitly supplied physical parameters to the orbit row order."""
+    validate_physical_parameters(table)
+    indexed = table.set_index("ObjID")
+    missing = set(object_ids) - set(indexed.index)
+    if missing:
+        raise ValueError(f"Missing physical parameters for {sorted(missing)}")
+    return indexed.loc[list(object_ids)].reset_index()
+
+
 # -- comet -> sorcha format converters --
 
 
