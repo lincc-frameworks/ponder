@@ -18,8 +18,7 @@ The exporter explicitly requires `--time-semantics date-avg-tai`, verifies that
 legacy relationship, and computes the true exposure start in TAI as
 `mjd_start - exposureTime/172800`. It does not reinterpret TAI as UTC or use a
 fixed UTC correction across the archive. This convention must be re-audited for
-other collection producers. The completed validation checked 76 original FITS
-headers spanning all 62 nights and exposure-duration variants.
+other collection producers. Recheck FITS headers across dates and exposure-duration variants before adopting this convention.
 
 The 1.1-degree circle is only a candidate field cone. The `detector_footprints`
 table must be checked before claiming detector coverage; masks are a further,
@@ -88,13 +87,11 @@ Omitting this option preserves the previous conversion and resume hash behavior.
 
 ## Validation boundary
 
-The full archive export contains 8,235 visits and 472,046 unique detector footprints.
-The completed propagation test used **110 DEEP VI objects and 505 exposures in seven
-2022 stares**, not every MPC object over the entire archive. It reproduced the 97
-objects / 136 object-night field-circle opportunities from the Horizons handoff.
-An unchanged second run processed zero new objects. Unit tests also cover default
-backend dispatch, VR physical-parameter alignment, timing, quoted ECSV parsing,
-duplicate aliases, and the existing new-objects behavior.
+Unit tests cover backend dispatch, physical-parameter alignment, timing, quoted
+ECSV parsing, duplicate aliases, and export geometry. Live scientific validation
+requires frozen orbit/pointing inputs, the pinned Sorcha runtime and kernels,
+and an explicit comparison to an independent ephemeris source. Test an unchanged
+second run to verify that the new-objects baseline processes zero new objects.
 
 KnownObjsMatcher associations are a separate stage. Use image-validity masks and
 an explicit positional tolerance; a fixed 1-arcsecond gate can reject displaced
