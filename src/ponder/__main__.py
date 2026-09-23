@@ -89,7 +89,7 @@ def main():
     args = parser.parse_args()
     orbit_path = args.orbits
     if args.download_orbits:
-        date_str = datetime.now(timezone.utc).strftime("%d-%m-%Y")
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         orbit_path = get_current_orbits(date_str, args.work_dir, comet=args.comet)
     if not orbit_path:
         print("Error: Must provide --orbits or --download_orbits")
