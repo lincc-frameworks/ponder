@@ -1,3 +1,4 @@
+import re
 import sys
 
 from ponder import __main__ as ponder_main
@@ -21,7 +22,8 @@ def test_download_orbits_without_db_skips_analysis(monkeypatch, tmp_path, capsys
     ponder_main.main()
 
     assert len(download_calls) == 1
-    _, work_dir, comet = download_calls[0]
+    date_str, work_dir, comet = download_calls[0]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str)
     assert work_dir == tmp_path
     assert comet is True
     out = capsys.readouterr().out
