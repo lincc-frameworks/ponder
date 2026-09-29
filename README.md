@@ -1,6 +1,18 @@
 
 # ponder
 
+### Comets with unknown brightness
+
+Comet H is optional: an otherwise usable orbit is retained and its `H_r`
+is null/NaN when H is missing. No brightness is imputed. To retain such
+objects in the final predictions, use a geometry-only Sorcha configuration:
+omit `mag_limit`, `snr_limit`, and `bright_limit`; set `default_snr_cut`,
+`randomization_on`, `vignetting_on`, and `trailing_losses_on` to False;
+disable fading and linking filters. Numeric magnitude cuts reject unknowns.
+Required epoch and perihelion dates are still mandatory. Use a fresh run
+directory when recovering objects excluded by an earlier version; old
+completion state does not automatically invalidate on a code change.
+
 
 
 [![Template](https://img.shields.io/badge/Template-LINCC%20Frameworks%20Python%20Project%20Template-brightgreen)](https://lincc-ppt.readthedocs.io/en/latest/)
@@ -390,3 +402,17 @@ Notes:
    that a set of tests will be run prior to completing a local commit. For more
    information, see the Python Project Template documentation on 
    [pre-commit](https://lincc-ppt.readthedocs.io/en/latest/practices/precommit.html)
+
+
+## NEO-only runs
+
+Use `--neo` with an MPCORB catalog to select asteroids with the standard
+`q = a(1-e) < 1.3 au` criterion. The population cut is always applied;
+`--no-filter-orbits` disables only Ponder's additional orbit-quality filter. NEO state
+and chunk-resume digests use a separate `neos` namespace, so they cannot collide
+with full-asteroid or comet runs against the same pointing database.
+
+```bash
+ponder --neo --db pointings.db --orbits mpcorb_extended.json --config sorcha.ini \
+  --no-filter-orbits
+```
