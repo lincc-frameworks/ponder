@@ -1,0 +1,37 @@
+{
+  "first_obsnight": "2025-04-15",
+  "last_obsnight": "2026-07-14",
+  "missing_ponder_visit_matches": 0,
+  "night_count": 306,
+  "object_counts": {
+    "jpl": 480,
+    "ponder": 200,
+    "skybot": 1332
+  },
+  "object_membership_counts": {
+    "jpl": 38,
+    "jpl+ponder": 6,
+    "ponder": 20,
+    "skybot": 802,
+    "skybot+jpl": 356,
+    "skybot+jpl+ponder": 80,
+    "skybot+ponder": 94
+  },
+  "object_night_counts": {
+    "jpl": 7967,
+    "ponder": 2530,
+    "skybot": 15999
+  },
+  "object_visit_counts": {
+    "jpl": 26794,
+    "ponder": 13016,
+    "skybot": 36713
+  },
+  "ponder_only_cutout_rows": 20,
+  "ponder_only_object_count": 20,
+  "source_comet_rows": {
+    "jpl": 40140,
+    "ponder": 13016,
+    "skybot": 40773
+  }
+}

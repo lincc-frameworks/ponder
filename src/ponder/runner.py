@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +30,10 @@ CATALOG_ROW_COLUMN = "ponder_catalog_row"
 UPDATE_MODE_AUTO = "auto"
 UPDATE_MODE_NEW_OBJECTS = "new-objects"
 UPDATE_MODES = (UPDATE_MODE_AUTO, UPDATE_MODE_NEW_OBJECTS)
+OBJECT_MODE_ASTEROID = "asteroid"
+OBJECT_MODE_COMET = "comet"
+OBJECT_MODES = (OBJECT_MODE_ASTEROID, OBJECT_MODE_COMET)
+COMET_CONFIG_SUFFIX = "_comet_no_bright_limit"
 
 # Sorcha output schemas have shifted between releases, so audits look for the
 # first usable object/time columns instead of assuming one fixed CSV shape.
@@ -98,6 +103,48 @@ def run_context_digest(db_path, config_path, comet, **metadata):
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
 
+def prepare_sorcha_config_for_mode(config_path, comet, work_dir):
+    """Return the effective Sorcha config, disabling saturation for comets."""
+    config_path = Path(config_path)
+    if not comet:
+        return config_path
+
+    lines = config_path.read_text().splitlines(keepends=True)
+    output_lines = []
+    in_saturation = False
+    removed = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_saturation = stripped[1:-1].strip().casefold() == "saturation"
+        if (
+            in_saturation
+            and stripped
+            and not stripped.startswith(("#", ";"))
+            and "=" in line
+            and line.split("=", 1)[0].strip().casefold() == "bright_limit"
+        ):
+            output_lines.append(
+                "# bright_limit omitted by Ponder for comet mode (no saturation cut)\n"
+            )
+            removed += 1
+            continue
+        output_lines.append(line)
+
+    suffix = config_path.suffix or ".ini"
+    effective_path = Path(work_dir) / (
+        f"{config_path.stem}{COMET_CONFIG_SUFFIX}{suffix}"
+    )
+    content = "".join(output_lines)
+    if not effective_path.exists() or effective_path.read_text() != content:
+        effective_path.write_text(content)
+    print(
+        "  Comet Sorcha config — saturation disabled; "
+        f"removed bright_limit entries: {removed}; effective config: {effective_path}"
+    )
+    return effective_path
+
+
 @dataclass(frozen=True)
 class SorchaChunk:
     """A row range plus the concrete input, output, and marker files it owns."""
@@ -163,8 +210,9 @@ def _terminate_process_group(proc):
 def run_sorcha(orbits, physparams, output, db, config, timeout=None):
     print(output.with_suffix(""))
     command = [
-        "sorcha",
-        "run",
+        sys.executable,
+        "-m",
+        "ponder.sorcha_wrapper",
         "-c",
         str(config),
         "--ob",
@@ -564,6 +612,7 @@ def write_chunk_manifest(
     digest,
     catalog_snapshot_path=None,
     context_digest=None,
+    object_mode=None,
 ):
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -572,6 +621,7 @@ def write_chunk_manifest(
         "chunk_size": chunk_size,
         "digest": digest,
         "context_digest": context_digest or "",
+        "object_mode": object_mode or "",
         "catalog_snapshot_path": "" if catalog_snapshot_path is None else str(catalog_snapshot_path),
         "chunks": [
             {
@@ -1164,7 +1214,9 @@ def run_failing_row_isolation(
     return all_results
 
 
-def combine_csv_to_parquet(input_paths, output_path):
+def combine_csv_to_parquet(input_paths, output_path, object_mode=None):
+    if object_mode is not None and object_mode not in OBJECT_MODES:
+        raise ValueError(f"Unknown object mode: {object_mode}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     super_df = []
     for input_path in input_paths:
@@ -1181,6 +1233,14 @@ def combine_csv_to_parquet(input_paths, output_path):
         super_df = [pd.DataFrame()]
 
     super_df = pd.concat(super_df, ignore_index=True)
+    if object_mode is not None:
+        if "object_mode" in super_df.columns:
+            existing_modes = set(super_df["object_mode"].dropna().astype(str).unique())
+            if existing_modes - {object_mode}:
+                raise ValueError(
+                    f"Cannot label {output_path} as {object_mode}; found modes {sorted(existing_modes)}"
+                )
+        super_df["object_mode"] = pd.Series(object_mode, index=super_df.index, dtype="string")
     if "fieldMJD_TAI" in super_df.columns:
         super_df.sort_values(by="fieldMJD_TAI", inplace=True)
     super_df.to_parquet(output_path, index=False)
@@ -1204,11 +1264,12 @@ def combine_csv_files(input_paths, output_path):
                     out.write(line)
 
 
-def combine_chunk_outputs(chunks, final_output):
-    combine_csv_to_parquet([chunk.output_path for chunk in chunks], final_output)
+def combine_chunk_outputs(chunks, final_output, object_mode=None):
+    combine_csv_to_parquet([chunk.output_path for chunk in chunks], final_output, object_mode)
     combine_csv_to_parquet(
         [chunk.ew_output_path for chunk in chunks],
         final_output.with_name(f"{final_output.stem}_ew.parquet"),
+        object_mode,
     )
 
 
@@ -1466,7 +1527,7 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
     return summary, missing
 
 
-def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None):
+def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None, object_mode=None):
     if results_dir is None:
         results_dir = chunks[0].output_path.parent
     else:
@@ -1488,6 +1549,7 @@ def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None)
         # Audit detections and ephemerides independently because their column
         # names and zero-output behavior can diverge.
         summary, missing = audit_output_pairs(source_paths, combined_path, output_name, catalog_rows)
+        summary["object_mode"] = object_mode or ""
         audit_rows.append(summary)
         if not missing.empty:
             missing_frames.append(missing)
@@ -1537,6 +1599,7 @@ def run_sorcha_chunks(
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
+    object_mode=None,
 ):
     workers = max(1, workers)
     if len(orbs) != len(phys):
@@ -1589,6 +1652,7 @@ def run_sorcha_chunks(
         digest,
         catalog_snapshot_path=catalog_snapshot_path,
         context_digest=context_digest,
+        object_mode=object_mode,
     )
     write_chunk_manifest(
         results_manifest_path,
@@ -1599,6 +1663,7 @@ def run_sorcha_chunks(
         digest,
         catalog_snapshot_path=catalog_snapshot_path,
         context_digest=context_digest,
+        object_mode=object_mode,
     )
 
     if force_debug_chunking:
@@ -1710,7 +1775,7 @@ def run_sorcha_chunks(
                     )
 
                 isolated_failures = isolated_failed_row_results(debug_results)
-                combine_chunk_outputs(chunks_to_combine, final_output)
+                combine_chunk_outputs(chunks_to_combine, final_output, object_mode=object_mode)
                 print(
                     f"  Combined {len(chunks_to_combine)} parent/debug chunks into {final_output}; "
                     f"skipped {len(isolated_failures)} isolated failing rows"
@@ -1720,6 +1785,7 @@ def run_sorcha_chunks(
                     final_output,
                     catalog_rows,
                     results_dir=chunks[0].output_path.parent,
+                    object_mode=object_mode,
                 )
                 print(f"  Wrote output audit to {audit_path}")
                 if missing_rows:
@@ -1749,19 +1815,20 @@ def run_sorcha_chunks(
         missing = [f"{chunk.index:05d}" for chunk in chunks if not chunk_is_complete(chunk)]
         raise RuntimeError(f"Cannot combine {job_name}; incomplete chunks: {', '.join(missing)}")
 
-    combine_chunk_outputs(chunks, final_output)
+    combine_chunk_outputs(chunks, final_output, object_mode=object_mode)
     print(f"  Combined {len(chunks)} chunks into {final_output}")
     audit_path, missing_path, missing_rows = audit_combined_outputs(
         chunks,
         final_output,
         catalog_rows,
         results_dir=chunks[0].output_path.parent,
+        object_mode=object_mode,
     )
     print(f"  Wrote output audit to {audit_path}")
     if missing_rows:
         print(f"  Output audit — missing {missing_rows} chunk output rows; details in {missing_path}")
     else:
-        print(f"  Output audit — all chunk object/timestamp pairs are present in combined outputs")
+        print("  Output audit — all chunk object/timestamp pairs are present in combined outputs")
     visible, visible_ew, statuses = promote_combined_outputs(final_output)
     print(
         f"  Visible combined outputs — detections: {statuses['detections']} {visible}; "
@@ -1812,6 +1879,7 @@ def run_id_set(
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
+        object_mode=OBJECT_MODE_COMET if comet else OBJECT_MODE_ASTEROID,
     )
 
 
@@ -1875,10 +1943,19 @@ def run_ponder(
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
     update_mode=UPDATE_MODE_AUTO,
+    work_dir=None,
+    results_dir=None,
 ):
     """Run Ponder on the given configs."""
+    global WORK_DIR, RESULTS_DIR
+
     if update_mode not in UPDATE_MODES:
         raise ValueError(f"Unknown update mode: {update_mode}")
+
+    if work_dir is not None:
+        WORK_DIR = Path(work_dir)
+    if results_dir is not None:
+        RESULTS_DIR = Path(results_dir)
 
     db_path = Path(db_path)
     object_path = Path(object_path)
@@ -1892,8 +1969,9 @@ def run_ponder(
     if isolate_failing_rows and debug_failed_chunk_size <= 0:
         raise ValueError("--isolate-failing-rows requires --debug-failed-chunk-size > 0")
 
-    WORK_DIR.mkdir(exist_ok=True)
-    RESULTS_DIR.mkdir(exist_ok=True)
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    config_path = prepare_sorcha_config_for_mode(config_path, comet, WORK_DIR)
     validated_rows = validate_observations_db(db_path)
     print(f"  Pointing DB validation — rows: {validated_rows}")
 

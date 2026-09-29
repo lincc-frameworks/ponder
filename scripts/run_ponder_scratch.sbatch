@@ -15,7 +15,6 @@ PONDER_REPO="${PONDER_REPO:-/sdf/home/c/colinc/repos/ponder}"
 PONDER_RUN_DIR="${PONDER_RUN_DIR:-/sdf/scratch/rubin/kbmod/ponder}"
 PONDER_DB="${PONDER_DB:-${PONDER_RUN_DIR}/pointing_dbs/pointings.sqlite}"
 PONDER_CONFIG="${PONDER_CONFIG:-${PONDER_RUN_DIR}/sorcha_ponder_config.ini}"
-PONDER_WORK_DIR="${PONDER_WORK_DIR:-${PONDER_RUN_DIR}/work}"
 MPLCONFIGDIR="${MPLCONFIGDIR:-${PONDER_RUN_DIR}/mplconfig}"
 
 UPDATE_MODE="${UPDATE_MODE:-auto}"
@@ -29,7 +28,18 @@ ONLY_CHUNKS="${ONLY_CHUNKS:-}"
 COMET="${COMET:-0}"
 NO_FILTER_ORBITS="${NO_FILTER_ORBITS:-0}"
 
-mkdir -p "${PONDER_RUN_DIR}/logs" "${PONDER_WORK_DIR}" "${MPLCONFIGDIR}"
+if [[ "${COMET}" == "1" ]]; then
+  OBJECT_MODE="comet"
+  MODE_DIRNAME="comets"
+else
+  OBJECT_MODE="asteroid"
+  MODE_DIRNAME="asteroids"
+fi
+PONDER_MODE_ROOT="${PONDER_MODE_ROOT:-${PONDER_RUN_DIR}/${MODE_DIRNAME}}"
+PONDER_WORK_DIR="${PONDER_WORK_DIR:-${PONDER_MODE_ROOT}/work}"
+PONDER_RESULTS_DIR="${PONDER_RESULTS_DIR:-${PONDER_MODE_ROOT}/results}"
+
+mkdir -p "${PONDER_RUN_DIR}/logs" "${PONDER_WORK_DIR}" "${PONDER_RESULTS_DIR}" "${MPLCONFIGDIR}"
 cd "${PONDER_RUN_DIR}"
 
 export MPLCONFIGDIR
@@ -43,6 +53,8 @@ echo "run_dir=${PONDER_RUN_DIR}"
 echo "db=${PONDER_DB}"
 echo "config=${PONDER_CONFIG}"
 echo "work_dir=${PONDER_WORK_DIR}"
+echo "results_dir=${PONDER_RESULTS_DIR}"
+echo "object_mode=${OBJECT_MODE}"
 echo "update_mode=${UPDATE_MODE}"
 echo "chunk_size=${CHUNK_SIZE}"
 echo "sorcha_workers=${SORCHA_WORKERS}"
@@ -64,6 +76,7 @@ command=(python -m ponder
   --db "${PONDER_DB}"
   --config "${PONDER_CONFIG}"
   --work-dir "${PONDER_WORK_DIR}"
+  --results-dir "${PONDER_RESULTS_DIR}"
   --update-mode "${UPDATE_MODE}"
   --chunk-size "${CHUNK_SIZE}"
   --sorcha-workers "${SORCHA_WORKERS}"

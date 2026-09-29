@@ -1,0 +1,12 @@
+{
+  "ponder_only_identities": 118,
+  "identities_with_cutouts": 83,
+  "identities_without_cutouts": 35,
+  "png_files": 83,
+  "compressed_fits_files": 91,
+  "requested_dataset_attempts": 236,
+  "successful_dataset_attempts": 166,
+  "failed_dataset_attempts": 70,
+  "slurm_job_id": 35695621,
+  "output_root": "/sdf/scratch/rubin/kbmod/users/colinc/rcc/ponder_only_comets_20260824"
+}

@@ -114,7 +114,7 @@ Sorcha execution is chunked by default so long runs can resume after failures.
 The default chunk size is 5000 rows. Completed chunks are marked with `.done`
 files and are skipped on later runs with the same inputs. Ponder shows a tqdm
 progress bar for the current batch set, including the number of workers, and it
-combines all completed chunks into the usual output CSVs when the full job
+combines all completed chunks into the usual Parquet outputs when the full job
 finishes. If a chunk fails, Ponder now splits it into 250-row debug chunks by
 default, recursively isolates remaining failures to single catalog rows, and
 combines the successful parent/debug ranges into the final output while leaving
@@ -124,8 +124,71 @@ Per-chunk work files and Sorcha outputs live under `work/chunk_runs/` and
 `results/chunk_runs/` so the top-level `results/` directory stays readable.
 Ponder keeps the authoritative combined files in the digest-scoped run directory
 and also exposes hard links, or copies if hard links are not available, at
-`results/<date>_job_<job>.csv` and `results/<date>_job_<job>_ew.csv` when no
-conflicting top-level file already exists.
+`results/<date>_job_<job>.parquet` and `results/<date>_job_<job>_ew.parquet` when
+no conflicting top-level file already exists. The scratch Slurm wrapper uses
+separate `asteroids/{work,results}` and `comets/{work,results}` roots, and every
+combined parquet and run manifest records `object_mode` as `asteroid` or
+`comet`.
+
+Comet runs also derive an effective Sorcha configuration in their work
+directory with `[SATURATION] bright_limit` omitted. Asteroid runs continue to
+use the supplied configuration unchanged. This keeps bright comets in the
+simulated detections while preserving the normal asteroid saturation cut.
+
+Sorcha's linker asserts that every observation lies within a fixed nightly
+phase window. For an individual object whose observations violate that check,
+Ponder's Sorcha wrapper moves the boundary into that object's largest
+observation-free daily gap and retries the same linker. Objects already valid
+under the configured boundary are unchanged.
+
+After both mode-specific runs are audited, make one RCC-ingestible result pair
+without discarding that provenance:
+
+```bash
+PYTHONPATH=src:$PYTHONPATH python -m ponder.mode_combine \
+  --asteroid-results-dir /path/to/asteroids/results \
+  --comet-results-dir /path/to/comets/results \
+  --output-results-dir /path/to/combined/results
+```
+
+The combiner streams both inputs, writes `object_mode` on every row, and emits
+an audited `chunk_runs/<date>_job_new_<digest>/` pair plus top-level links. This
+layout is directly discoverable by the RCC Ponder nightly updater.
+
+For the RCC nightly workflow, the checked-in Slurm wrappers provide the full
+sequence:
+
+1. Run `scripts/run_ponder_scratch.sbatch` once with `COMET=0` and once with
+   `COMET=1`. The wrapper places the runs under separate `asteroids/` and
+   `comets/` roots.
+2. Run `scripts/combine_ponder_modes.sbatch` to select the latest audited run of
+   each mode and create the combined archival Parquet pair.
+3. Run `scripts/update_rcc_from_combined.sbatch` to backfill legacy asteroid
+   products, publish Ponder nightly sources, rebuild RCC unified products, and
+   fail if any selected output is stale or loses `object_mode`.
+
+The lower-level commands are also available independently:
+
+```bash
+python scripts/backfill_rcc_object_mode.py /path/to/lsstcam \
+  --object-mode asteroid --apply
+python scripts/audit_rcc_unified_results.py /path/to/lsstcam
+```
+
+`scripts/update_rcc_ponder_sources_only.py` publishes Ponder nightly sources
+without rebuilding unified products. `scripts/recover_cancelled_rcc_ingestion.py`
+has a dry-run mode for quarantining partial files after a cancelled ingestion;
+add `--apply` only after reviewing its planned moves. `scripts/generate_ponder_cutouts.py`
+converts the normalized `ponder_only_cutout_input.parquet` produced by the
+service-comparison analysis into RCC cutouts.
+
+The reproducible analysis deliverables are checked in under
+`analysis/comet_service_comparison_20260824/` and
+`analysis/comet_service_comparison_no_bright_limit_20260824/`. Each directory
+contains its README, summary JSON, service-membership tables, Ponder-only
+candidate table, and representative cutout input. The comparison script is
+`scripts/analyze_comet_services.py`; it compares object, object-night, and
+object-visit membership across SkyBot, JPL, and Ponder.
 
 ## DP1 Heliocentric-Distance Reports
 

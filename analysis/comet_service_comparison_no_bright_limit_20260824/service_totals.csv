@@ -1,0 +1,10 @@
+grain,service,count
+object,skybot,1332
+object,jpl,480
+object,ponder,200
+object-night,skybot,15999
+object-night,jpl,7967
+object-night,ponder,2530
+object-visit,skybot,36713
+object-visit,jpl,26794
+object-visit,ponder,13016

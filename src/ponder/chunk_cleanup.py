@@ -10,7 +10,7 @@ import re
 import shutil
 from pathlib import Path
 
-from .runner import CHUNK_RUNS_DIRNAME, combine_csv_files
+from .runner import CHUNK_RUNS_DIRNAME, combine_csv_files, combine_csv_to_parquet
 
 RUN_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_job_.+_[0-9a-f]{12}$")
 
@@ -28,7 +28,7 @@ def _resolve_path(root, path_text):
 
 
 def _ew_output_path(output_path):
-    return output_path.with_name(f"{output_path.stem}_ew.csv")
+    return output_path.with_name(f"{output_path.stem}_ew{output_path.suffix}")
 
 
 def _chunk_is_complete(root, chunk):
@@ -74,9 +74,15 @@ def _audit_ok(run_dir):
 def _final_output_paths(root, manifest_path, manifest):
     run_dir = Path(manifest_path).parent
     date = run_dir.name.split("_job_", 1)[0]
-    final_output = run_dir / f"{date}_job_{manifest['job_name']}.csv"
+    suffix = ".parquet" if manifest.get("object_mode") else ".csv"
+    final_output = run_dir / f"{date}_job_{manifest['job_name']}{suffix}"
     visible_output = Path(root) / "results" / final_output.name
-    return final_output, _ew_output_path(final_output), visible_output, _ew_output_path(visible_output)
+    return (
+        final_output,
+        _ew_output_path(final_output),
+        visible_output,
+        _ew_output_path(visible_output),
+    )
 
 
 def _link_or_copy(src, dst, apply):
@@ -116,28 +122,51 @@ def _combine_or_link_back(source, output, apply):
 
 
 def _combine_complete_manifest(
-    root, manifest, final_output, final_ew_output, visible_output, visible_ew_output, apply
+    root,
+    manifest,
+    final_output,
+    final_ew_output,
+    visible_output,
+    visible_ew_output,
+    apply,
 ):
     messages = []
     backfill = _combine_or_link_back(visible_output, final_output, apply)
     if backfill:
         messages.append(backfill)
     if not final_output.exists() and not visible_output.exists():
-        output_paths = [_resolve_path(root, chunk["output_path"]) for chunk in manifest["chunks"]]
-        messages.append(f"{'would combine' if not apply else 'combined'} detections into {final_output}")
+        output_paths = [
+            _resolve_path(root, chunk["output_path"]) for chunk in manifest["chunks"]
+        ]
+        messages.append(
+            f"{'would combine' if not apply else 'combined'} detections into {final_output}"
+        )
         if apply:
-            combine_csv_files(output_paths, final_output)
+            if final_output.suffix == ".parquet":
+                combine_csv_to_parquet(
+                    output_paths, final_output, manifest.get("object_mode")
+                )
+            else:
+                combine_csv_files(output_paths, final_output)
 
     ew_backfill = _combine_or_link_back(visible_ew_output, final_ew_output, apply)
     if ew_backfill:
         messages.append(ew_backfill)
     if not final_ew_output.exists() and not visible_ew_output.exists():
         ew_paths = [
-            _ew_output_path(_resolve_path(root, chunk["output_path"])) for chunk in manifest["chunks"]
+            _ew_output_path(_resolve_path(root, chunk["output_path"]))
+            for chunk in manifest["chunks"]
         ]
-        messages.append(f"{'would combine' if not apply else 'combined'} ephemerides into {final_ew_output}")
+        messages.append(
+            f"{'would combine' if not apply else 'combined'} ephemerides into {final_ew_output}"
+        )
         if apply:
-            combine_csv_files(ew_paths, final_ew_output)
+            if final_ew_output.suffix == ".parquet":
+                combine_csv_to_parquet(
+                    ew_paths, final_ew_output, manifest.get("object_mode")
+                )
+            else:
+                combine_csv_files(ew_paths, final_ew_output)
 
     return messages
 
@@ -148,13 +177,15 @@ def consolidate_manifest(root, manifest_path, apply=False):
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text())
     run_dir = manifest_path.parent
-    final_output, final_ew_output, visible_output, visible_ew_output = _final_output_paths(
-        root, manifest_path, manifest
+    final_output, final_ew_output, visible_output, visible_ew_output = (
+        _final_output_paths(root, manifest_path, manifest)
     )
     messages = []
 
     complete = _manifest_is_complete(root, manifest)
-    audited_combined = final_output.exists() and final_ew_output.exists() and _audit_ok(run_dir)
+    audited_combined = (
+        final_output.exists() and final_ew_output.exists() and _audit_ok(run_dir)
+    )
     if complete:
         messages.extend(
             _combine_complete_manifest(
@@ -168,8 +199,12 @@ def consolidate_manifest(root, manifest_path, apply=False):
             )
         )
     elif not audited_combined:
-        missing = sum(1 for chunk in manifest["chunks"] if not _chunk_is_complete(root, chunk))
-        messages.append(f"left incomplete run unconsolidated: {run_dir.name} missing_chunks={missing}")
+        missing = sum(
+            1 for chunk in manifest["chunks"] if not _chunk_is_complete(root, chunk)
+        )
+        messages.append(
+            f"left incomplete run unconsolidated: {run_dir.name} missing_chunks={missing}"
+        )
         return messages
 
     # Salvaged runs can have failed parent markers but still contain audited
@@ -214,17 +249,23 @@ def consolidate_chunk_artifacts(root=".", apply=False, archive=True):
     if archive:
         for run_dir in sorted(results_dir.iterdir() if results_dir.exists() else []):
             if run_dir.is_dir() and RUN_DIR_RE.match(run_dir.name):
-                moved = _move_if_needed(run_dir, results_dir / CHUNK_RUNS_DIRNAME / run_dir.name, apply)
+                moved = _move_if_needed(
+                    run_dir, results_dir / CHUNK_RUNS_DIRNAME / run_dir.name, apply
+                )
                 if moved:
                     messages.append(moved)
         for run_dir in sorted(work_dir.iterdir() if work_dir.exists() else []):
             if run_dir.is_dir() and RUN_DIR_RE.match(run_dir.name):
-                moved = _move_if_needed(run_dir, work_dir / CHUNK_RUNS_DIRNAME / run_dir.name, apply)
+                moved = _move_if_needed(
+                    run_dir, work_dir / CHUNK_RUNS_DIRNAME / run_dir.name, apply
+                )
                 if moved:
                     messages.append(moved)
 
         log_dir = results_dir / "logs"
-        for log_path in sorted(results_dir.glob("*-sorcha.log")) + sorted(results_dir.glob("*-sorcha.err")):
+        for log_path in sorted(results_dir.glob("*-sorcha.log")) + sorted(
+            results_dir.glob("*-sorcha.err")
+        ):
             moved = _move_if_needed(log_path, log_dir / log_path.name, apply)
             if moved:
                 messages.append(moved)
@@ -234,16 +275,27 @@ def consolidate_chunk_artifacts(root=".", apply=False, archive=True):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Consolidate Ponder chunk artifacts")
-    parser.add_argument("root", nargs="?", default=".", help="Directory containing Ponder work/ and results/")
     parser.add_argument(
-        "--apply", action="store_true", help="Actually write links, combined files, and moves"
+        "root",
+        nargs="?",
+        default=".",
+        help="Directory containing Ponder work/ and results/",
     )
     parser.add_argument(
-        "--no-archive", action="store_true", help="Leave digest-scoped run directories in place"
+        "--apply",
+        action="store_true",
+        help="Actually write links, combined files, and moves",
+    )
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Leave digest-scoped run directories in place",
     )
     args = parser.parse_args(argv)
 
-    messages = consolidate_chunk_artifacts(args.root, apply=args.apply, archive=not args.no_archive)
+    messages = consolidate_chunk_artifacts(
+        args.root, apply=args.apply, archive=not args.no_archive
+    )
     for message in messages:
         print(message)
 

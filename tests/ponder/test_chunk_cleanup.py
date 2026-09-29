@@ -1,9 +1,11 @@
 import json
 
+import pandas as pd
+
 from ponder import chunk_cleanup
 
 
-def _write_chunk_run(root, run_name, job_name="new"):
+def _write_chunk_run(root, run_name, job_name="new", object_mode=None):
     run_dir = root / "results" / run_name
     work_dir = root / "work" / run_name
     run_dir.mkdir(parents=True)
@@ -17,6 +19,7 @@ def _write_chunk_run(root, run_name, job_name="new"):
         "row_count": 2,
         "chunk_size": 2,
         "digest": run_name.rsplit("_", 1)[-1],
+        "object_mode": object_mode,
         "chunks": [
             {
                 "index": 0,
@@ -60,3 +63,14 @@ def test_consolidate_chunk_artifacts_dry_run_leaves_files_in_place(tmp_path):
     assert work_dir.exists()
     assert any("would combine" in message for message in messages)
     assert any("would move" in message for message in messages)
+
+
+def test_consolidate_mode_manifest_preserves_object_mode_in_parquet(tmp_path):
+    run_name = "2026-05-05_job_new_abcdef123456"
+    _write_chunk_run(tmp_path, run_name, object_mode="comet")
+
+    chunk_cleanup.consolidate_chunk_artifacts(tmp_path, apply=True)
+
+    visible = tmp_path / "results" / "2026-05-05_job_new.parquet"
+    assert visible.exists()
+    assert set(pd.read_parquet(visible)["object_mode"]) == {"comet"}

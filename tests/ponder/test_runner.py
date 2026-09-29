@@ -3,10 +3,12 @@ import json
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from ponder import runner
+from ponder.sorcha_wrapper import adjusted_night_start
 
 
 def _write_observations_db(path, mjds):
@@ -344,6 +346,46 @@ def _asteroid(principal_desig, e=0.1):
         "H": 15.0,
         "U": 0,
     }
+
+
+def test_prepare_sorcha_config_disables_saturation_only_for_comets(tmp_path):
+    config_path = tmp_path / "sorcha.ini"
+    config_path.write_text(
+        "[SATURATION]\n"
+        "bright_limit = 16.0\n"
+        "other_setting = keep\n"
+        "[OUTPUT]\n"
+        "bright_limit = unrelated\n"
+    )
+
+    assert (
+        runner.prepare_sorcha_config_for_mode(
+            config_path, comet=False, work_dir=tmp_path
+        )
+        == config_path
+    )
+
+    effective = runner.prepare_sorcha_config_for_mode(
+        config_path, comet=True, work_dir=tmp_path
+    )
+    content = effective.read_text()
+    assert effective.name == "sorcha_comet_no_bright_limit.ini"
+    assert "# bright_limit omitted by Ponder for comet mode" in content
+    assert "other_setting = keep" in content
+    assert "[OUTPUT]\nbright_limit = unrelated" in content
+    assert "[SATURATION]\nbright_limit = 16.0" not in content
+
+
+def test_adjusted_night_start_only_changes_invalid_object_boundaries():
+    configured = 16.0 / 24.0
+    valid_times = [60000.80, 60001.10]
+    assert adjusted_night_start(valid_times, configured) == configured
+
+    invalid_times = [60000.70, 60001.00]
+    adjusted = adjusted_night_start(invalid_times, configured)
+    assert adjusted is not None
+    phased = (np.asarray(invalid_times) - adjusted) % 1.0
+    assert np.all((0.1 < phased) & (phased < 0.9))
 
 
 def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_path, monkeypatch):

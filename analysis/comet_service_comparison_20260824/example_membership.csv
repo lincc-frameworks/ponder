@@ -1,0 +1,3 @@
+name_norm,display_name,jpl,ponder,skybot,combination
+99p,99P,True,False,True,skybot+jpl
+c2020u4,C/2020 U4 (PANSTARRS),True,True,True,skybot+jpl+ponder

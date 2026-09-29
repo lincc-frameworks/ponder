@@ -17,15 +17,30 @@ def main():
     parser.add_argument("--db", type=Path, help="Path to the database file")
     parser.add_argument("--orbits", type=Path, help="Path to the orbits JSON file")
     parser.add_argument("--config", type=Path, help="Path to the configuration file")
-    parser.add_argument("--comet", action="store_true", help="Whether to run comet analysis")
     parser.add_argument(
-        "--work-dir", type=Path, default=Path.cwd() / "work", help="Directory to store intermediate files"
+        "--comet", action="store_true", help="Whether to run comet analysis"
     )
     parser.add_argument(
-        "--download_orbits", action="store_true", help="Whether to download the latest orbits from MPC"
+        "--work-dir",
+        type=Path,
+        default=Path.cwd() / "work",
+        help="Directory to store intermediate files",
     )
     parser.add_argument(
-        "--no-filter-orbits", action="store_true", help="Disable the default orbit-catalog filter"
+        "--results-dir",
+        type=Path,
+        default=Path.cwd() / "results",
+        help="Directory to store run results",
+    )
+    parser.add_argument(
+        "--download_orbits",
+        action="store_true",
+        help="Whether to download the latest orbits from MPC",
+    )
+    parser.add_argument(
+        "--no-filter-orbits",
+        action="store_true",
+        help="Disable the default orbit-catalog filter",
     )
     parser.add_argument(
         "--update-mode",
@@ -108,7 +123,9 @@ def main():
         return
     if args.db is None:
         if args.download_orbits:
-            print(f"No database supplied; downloaded orbits to {orbit_path}. Skipping Ponder analysis.")
+            print(
+                f"No database supplied; downloaded orbits to {orbit_path}. Skipping Ponder analysis."
+            )
         else:
             print("Error: Must provide --db to run Ponder analysis")
         return
@@ -133,6 +150,8 @@ def main():
         force_debug_chunking=args.force_debug_chunking,
         isolate_failing_rows=args.isolate_failing_rows,
         update_mode=args.update_mode,
+        work_dir=args.work_dir,
+        results_dir=args.results_dir,
     )
 
 
