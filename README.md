@@ -416,3 +416,39 @@ with full-asteroid or comet runs against the same pointing database.
 ponder --neo --db pointings.db --orbits mpcorb_extended.json --config sorcha.ini \
   --no-filter-orbits
 ```
+
+### Bounded-memory output assembly and recovery
+
+Chunk size controls Sorcha prediction work; it does not bound the size of the
+final baseline. Output assembly and multiplicity audits now use DuckDB external
+sorting/grouping instead of concatenating the entire baseline in pandas.
+`PONDER_OUTPUT_MEMORY_LIMIT` defaults to `8GB`, `PONDER_OUTPUT_THREADS` to `2`, and
+`PONDER_SPILL_DIR` to the output directory. Leave headroom above that processing
+limit in the Slurm allocation and enough disk space for temporary data. Temporary
+operation directories are removed on normal completion/failure; a hard kill can
+leave a `ponder-output-*` directory for later cleanup. The dependency is
+`duckdb>=1.4.4,<2`.
+
+Assembly preserves lexical object identities, all state columns, numeric exposure
+IDs, and chronological ordering. Each parquet is replaced atomically. Audits
+compare exact object/time multiplicities in both directions and block promotion
+on discrepancies. Full differences are retained in `*_pair_differences.parquet`;
+the legacy missing-row CSV contains at most 10,000 examples per output, with a
+truncation flag and full counts in `output_audit.csv`.
+
+Retries on later dates reuse a matching full input digest and chunk layout;
+ambiguous matching directories fail explicitly. To finish a killed combine/audit
+without executing any predictions, validate then apply:
+
+```bash
+python -m ponder.recover_outputs /path/to/chunk_runs/<run>/manifest.json
+python -m ponder.recover_outputs /path/to/chunk_runs/<run>/manifest.json --apply
+```
+
+Recovery requires complete, non-overlapping catalog coverage from saved success
+markers, including recovery subchunks and explicit zero-output successes. It
+retains the original run directory/date, validates both outputs, and only then
+exposes them. It does not advance incremental prediction state. A lock, source
+metadata fingerprint, and output receipt make interrupted recovery resumable and
+successful repeat application a no-op. Existing unrelated visible outputs are
+never replaced.

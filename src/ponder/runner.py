@@ -444,6 +444,16 @@ def plan_sorcha_chunks(job_name, time, row_count, chunk_size, digest):
     run_stem = f"{base_stem}_{digest[:12]}"
     # Keep the noisy per-chunk files below a dedicated subfolder, while the
     # digest still scopes resume markers to the DB/config/input combination.
+    matches = []
+    for manifest_path in (RESULTS_DIR / CHUNK_RUNS_DIRNAME).glob(f"*_job_{job_name}_{digest[:12]}/manifest.json"):
+        manifest = json.loads(manifest_path.read_text())
+        if (manifest.get("digest") == digest and manifest.get("row_count") == row_count
+                and manifest.get("chunk_size") == chunk_size and manifest.get("job_name") == job_name):
+            matches.append(manifest_path.parent.name)
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous resume directories for {job_name}: {matches}")
+    if matches:
+        run_stem = matches[0]
     work_dir = WORK_DIR / CHUNK_RUNS_DIRNAME / run_stem
     results_dir = RESULTS_DIR / CHUNK_RUNS_DIRNAME / run_stem
     chunks = []
@@ -1316,33 +1326,8 @@ def run_failing_row_isolation(
 def combine_csv_to_parquet(input_paths, output_path, object_mode=None):
     if object_mode is not None and object_mode not in OBJECT_MODES:
         raise ValueError(f"Unknown object mode: {object_mode}")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    super_df = []
-    for input_path in input_paths:
-        if not input_path.exists():
-            continue
-        if input_path.suffix == ".parquet":
-            df = pd.read_parquet(input_path)
-        else:
-            df = pd.read_csv(input_path)
-        super_df.append(df)
-
-    if not super_df:
-        # If no dataframes were collected, create an empty one
-        super_df = [pd.DataFrame()]
-
-    super_df = pd.concat(super_df, ignore_index=True)
-    if object_mode is not None:
-        if "object_mode" in super_df.columns:
-            existing_modes = set(super_df["object_mode"].dropna().astype(str).unique())
-            if existing_modes - {object_mode}:
-                raise ValueError(
-                    f"Cannot label {output_path} as {object_mode}; found modes {sorted(existing_modes)}"
-                )
-        super_df["object_mode"] = pd.Series(object_mode, index=super_df.index, dtype="string")
-    if "fieldMJD_TAI" in super_df.columns:
-        super_df.sort_values(by="fieldMJD_TAI", inplace=True)
-    super_df.to_parquet(output_path, index=False)
+    from .output_store import combine
+    combine(input_paths, output_path, object_mode)
 
 
 def combine_csv_files(input_paths, output_path):
@@ -1496,13 +1481,8 @@ def _first_present(columns, candidates):
 
 
 def _csv_columns(path):
-    try:
-        if path.suffix == ".parquet":
-            return list(pd.read_parquet(path).columns)
-        else:
-            return list(pd.read_csv(path, nrows=0).columns)
-    except (FileNotFoundError, pd.errors.EmptyDataError):
-        return []
+    from .output_store import columns
+    return columns(path)
 
 
 def output_pair_key_columns(paths):
@@ -1600,36 +1580,18 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
     if not key_columns:
         return summary, pd.DataFrame()
 
-    source_counts, source_rows = read_output_key_counts(source_paths, key_columns)
-    combined_counts, combined_rows = read_output_key_counts(
-        [combined_path], key_columns
-    )
-    summary["source_rows"] = source_rows
-    summary["combined_rows"] = combined_rows
-    summary["source_pairs"] = len(source_counts)
-    summary["combined_pairs"] = len(combined_counts)
-    summary["status"] = "ok"
-
-    if source_counts.empty:
-        return summary, pd.DataFrame()
-
-    source_counts.rename(columns={"row_count": "source_count"}, inplace=True)
-    combined_counts.rename(columns={"row_count": "combined_count"}, inplace=True)
-    print(source_counts.dtypes)
-    print(combined_counts.dtypes)
-    merged = source_counts.merge(combined_counts, on=key_columns, how="left")
-    merged["combined_count"] = merged["combined_count"].fillna(0).astype(int)
-    missing = merged[merged["source_count"] > merged["combined_count"]].copy()
+    from .output_store import audit_counts
+    totals, missing = audit_counts(source_paths, combined_path, key_columns, timestamp_column)
+    summary.update(totals)
+    summary["status"] = "missing" if totals["missing_rows"] else ("extra" if totals["extra_rows"] else "ok")
     if missing.empty:
         return summary, missing
-
-    missing["missing_count"] = missing["source_count"] - missing["combined_count"]
     missing.insert(0, "output_name", output_name)
     missing.insert(1, "object_id", missing[id_column].astype(str))
     missing.insert(
         2,
         "timestamp",
-        missing[timestamp_column].astype(str) if timestamp_column else "",
+        missing[timestamp_column].map(lambda value: format(value, ".17g")) if timestamp_column else "",
     )
     missing.insert(3, "id_column", id_column)
     missing.insert(4, "timestamp_column", timestamp_column)
@@ -1638,9 +1600,6 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
     if not lookup.empty:
         missing = missing.merge(lookup, on="object_id", how="left")
 
-    summary["missing_pairs"] = len(missing)
-    summary["missing_rows"] = int(missing["missing_count"].sum())
-    summary["status"] = "missing"
     return summary, missing
 
 
@@ -1696,7 +1655,7 @@ def audit_combined_outputs(chunks, final_output, catalog_rows, results_dir=None,
         )
     missing_report.to_csv(missing_path, index=False)
 
-    missing_rows = sum(row["missing_rows"] for row in audit_rows)
+    missing_rows = sum(row["missing_rows"] + row.get("extra_rows", 0) for row in audit_rows)
     return audit_path, missing_path, missing_rows
 
 
@@ -1828,7 +1787,7 @@ def run_sorcha_chunks(
         for chunk in chunks_to_run
         if chunk not in completed and chunk not in resumed_failures
     ]
-    final_output = chunks[0].output_path.parent / f"{time[:10]}_job_{job_name}.parquet"
+    final_output = chunks[0].output_path.parent / (chunks[0].output_path.parent.name.rsplit("_", 1)[0] + ".parquet")
     selected_text = ""
     if only_chunks is not None:
         selected_text = f", selected={len(chunks_to_run)}"
@@ -1926,10 +1885,7 @@ def run_sorcha_chunks(
                 )
                 print(f"  Wrote output audit to {audit_path}")
                 if missing_rows:
-                    print(
-                        f"  Output audit — missing {missing_rows} chunk output rows; "
-                        f"details in {missing_path}"
-                    )
+                    raise RuntimeError(f"Output audit found {missing_rows} discrepant rows; see {audit_path}")
                 else:
                     print(
                         "  Output audit — all chunk object/timestamp pairs are present in combined outputs"
@@ -1973,9 +1929,7 @@ def run_sorcha_chunks(
     )
     print(f"  Wrote output audit to {audit_path}")
     if missing_rows:
-        print(
-            f"  Output audit — missing {missing_rows} chunk output rows; details in {missing_path}"
-        )
+        raise RuntimeError(f"Output audit found {missing_rows} discrepant rows; see {audit_path}")
     else:
         print(
             "  Output audit — all chunk object/timestamp pairs are present in combined outputs"
