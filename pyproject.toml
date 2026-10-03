@@ -22,6 +22,7 @@ dependencies = [
     "sorcha",
     "tqdm",
     "pyarrow",
+    "requests",
 ]
 
 [project.urls]
@@ -68,3 +69,4 @@ omit=["src/ponder/_version.py"]
 [project.scripts]
 ponder = "ponder.__main__:main"
 ponder-consolidate-chunks = "ponder.chunk_cleanup:main"
+ponder-decam-pointings = "ponder.decam_pointings:main"

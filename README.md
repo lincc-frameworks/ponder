@@ -18,6 +18,121 @@ you whether or not you'd like to display it!
 For more information about the project template see the 
 [documentation](https://lincc-ppt.readthedocs.io/en/latest/).
 
+## Maintaining a DECam pointing catalog
+
+After installing Ponder (`pip install .` from this checkout), run:
+
+```bash
+# First run builds the catalog; subsequent runs update it.
+ponder-decam-pointings --output /path/to/decam_pointings.parquet
+
+# Reconcile the complete archive, including removed or backdated products.
+ponder-decam-pointings --output /path/to/decam_pointings.parquet --full-refresh
+
+# Inspect local freshness, coverage, validation issues, and unfinished work.
+ponder-decam-pointings --output /path/to/decam_pointings.parquet --status
+```
+
+The command uses the anonymous [NOIRLab Astro Data Archive metadata
+API](https://astroarchive.noirlab.edu/api/docs/). It does not download images,
+require a NOIRLab account, or depend on HARVEST's database. The first run queries
+monthly observation-date windows from January 2012 onward and can take a while;
+progress is printed after each completed window. The archive controls which
+metadata are visible, and some visible exposures have images that are still
+proprietary. No public-image release-date cutoff is applied.
+
+The Parquet has one row per `(instrument, exposure_id)`, where `exposure_id` is
+DECam's `EXPNUM`. It includes all filters for `obs_type=object`,
+`proc_type=raw/instcal/resampled`, and `prod_type=image/image1`. Stacks,
+calibration frames, masks, and weights are excluded. Among candidates with valid
+coordinates, timing, and duration, selection prefers `instcal`, then `raw`, then
+`resampled`. Within a processing type it chooses the latest archive update,
+then ascending archive filename and checksum for deterministic ties. This is a
+metadata-selection rule, not a guarantee that a product is the best scientific
+reduction. If all candidates for an exposure have invalid pointing metadata,
+the exposure remains in the catalog with nullable values and `quality_flags`.
+
+Read it directly with pandas:
+
+```python
+import pandas as pd
+
+pointings = pd.read_parquet("/path/to/decam_pointings.parquet")
+usable = pointings[pointings["quality_flags"].map(len) == 0]
+print(usable[["exposure_id", "ra_deg", "dec_deg", "start_mjd_utc", "filter"]])
+```
+
+The stable v1 columns are:
+
+| Columns | Meaning |
+| --- | --- |
+| `instrument`, `exposure_id` | Instrument and positive integer DECam exposure counter |
+| `ra_deg`, `dec_deg` | Archive-provided field center in degrees; not a CCD footprint |
+| `start_utc`, `midpoint_utc` | UTC ISO strings with fractional seconds and `Z`; strings also preserve leap seconds |
+| `start_mjd_utc`, `midpoint_mjd_utc` | Corresponding MJD values in **UTC**, not TAI |
+| `exposure_seconds`, `filter`, `proposal`, `observing_date` | Exposure duration, full original filter string, proposal, local observing-night date |
+| `proc_type`, `release_date`, `archive_updated_utc` | Selected product's processing, image-release date, and archive update time |
+| `archive_filename`, `original_filename`, `md5sum` | Selected product provenance |
+| `source_date_obs`, `source_timesys`, `source_mjd_obs`, `source_dateobs_center` | Source timing values retained as strings |
+| `quality_flags` | List of validation issues, empty when checks pass |
+
+Start time comes from `DATE-OBS` interpreted using `TIMESYS`; midpoint comes
+from the archive's `dateobs_center`. Missing or unknown time systems are flagged
+instead of assumed to be UTC. A midpoint inconsistent with start plus half the
+duration by more than one second is flagged. Exposure numbers that are missing,
+nonintegral, or outside the positive int64 range are quarantined in the sidecar,
+not matched by approximate timestamps. Such excluded products are counted in
+the command summary and `--status`, with up to ten examples in status output.
+Other quality flags identify invalid coordinates, timing, duration, update
+timestamps, or release dates. Review flags before using the catalog scientifically.
+
+### Updates, reconciliation, and recovery
+
+Keep `decam_pointings.parquet.sqlite3` alongside the Parquet. This private
+sidecar stores candidate products, original metadata, validation flags, and
+completed-window checkpoints. Allow disk space for both the published and
+pending generations in SQLite plus a temporary Parquet during export. Parquet
+is written in bounded batches, so the archive need not fit in memory. The
+adjacent `.lock` file prevents simultaneous updaters for the same output path;
+the OS releases the lock after a crash. Do not delete the lock file while an
+updater is running. Use a filesystem with reliable SQLite and file-lock support.
+
+Incremental runs search archive **update dates**, with a seven-day overlap, and
+release dates. This catches metadata corrections, reprocessing, and newly
+visible older observations. Windows are paginated with explicit ordering and
+before/after count checks; incomplete or changing windows are rolled back and
+retried. NOIRLab does not provide a transactional snapshot across requests, so
+these checks cannot detect every simultaneous change. Run `--full-refresh`
+monthly to reconcile removals, backdated changes, and other changes missed by
+the incremental queries. `--status` recommends reconciliation after 30 days.
+The command does not install a schedule.
+
+Rerun the same command after interruption. Completed windows are reused, and
+the previous Parquet remains readable until the replacement is fully written
+and atomically published. A failed export resumes from committed local data
+without contacting NOIRLab. A resumed run uses its original cutoff; run again
+afterward to catch up to the present. An explicit full refresh supersedes an
+unfinished incremental run; an unfinished full refresh resumes normally.
+
+The Parquet footer records the schema version, archive API version, generation,
+sync cutoff, and summary. `--status` reports whether it matches the sidecar. If
+the sidecar is lost, restore it from backup or explicitly use `--full-refresh`
+to rebuild it; the existing Parquet is preserved until rebuilding succeeds.
+To inspect quarantined original records, open the sidecar read-only and query
+`products` with `expnum IS NULL`; its `source` and `payload` columns contain JSON.
+During an unfinished update, filter by the `active_generation` shown in status
+to inspect the published generation.
+
+This catalog is not yet an input for `ponder --db`. Sorcha-compatible SQLite
+export, DECam footprints, and observing-condition mappings are separate work.
+
+Tests run offline against recorded metadata and simulated archive responses.
+To opt into the small live historical-window smoke test:
+
+```bash
+PONDER_LIVE_NOIRLAB=1 python -m pytest tests/ponder/test_decam_pointings.py -k live_noirlab
+```
+
 ## Running Ponder
 
 Ponder runs Sorcha against an orbit catalog and a pointing database:
