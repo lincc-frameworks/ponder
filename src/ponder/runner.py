@@ -11,6 +11,7 @@ from pathlib import Path
 from time import perf_counter
 
 import pandas as pd
+import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
 from .utils import *
@@ -1340,9 +1341,12 @@ def _first_present(columns, candidates):
 
 
 def _csv_columns(path):
+    if isinstance(path, str):
+        path = Path(path)
     try:
         if path.suffix == ".parquet":
-            return list(pd.read_parquet(path).columns)
+            schema = pq.read_schema(path)
+            return list(schema.names)
         else:
             return list(pd.read_csv(path, nrows=0).columns)
     except (FileNotFoundError, pd.errors.EmptyDataError):
@@ -1451,8 +1455,6 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
 
     source_counts.rename(columns={"row_count": "source_count"}, inplace=True)
     combined_counts.rename(columns={"row_count": "combined_count"}, inplace=True)
-    print(source_counts.dtypes)
-    print(combined_counts.dtypes)
     merged = source_counts.merge(combined_counts, on=key_columns, how="left")
     merged["combined_count"] = merged["combined_count"].fillna(0).astype(int)
     missing = merged[merged["source_count"] > merged["combined_count"]].copy()
@@ -1777,7 +1779,7 @@ def run_sorcha_chunks(
         f"  Visible combined outputs — detections: {statuses['detections']} {visible}; "
         f"ephemeris: {statuses['ephemeris']} {visible_ew}"
     )
-    return True
+    return final_output
 
 
 def run_id_set(
@@ -1801,7 +1803,7 @@ def run_id_set(
 ):
     inputs = build_id_set_inputs(objects, ids, job_name, comet)
     if not inputs:
-        return True
+        return None
 
     orbs, phys, catalog_rows = inputs
     return run_sorcha_chunks(
@@ -1830,6 +1832,7 @@ def run_ponder(
     object_path,
     config_path,
     comet,
+    main_orbit_file,
     filter_orbits=True,
     chunk_size=DEFAULT_CHUNK_SIZE,
     sorcha_workers=DEFAULT_SORCHA_WORKERS,
@@ -1854,6 +1857,8 @@ def run_ponder(
         raise ValueError("--force-debug-chunking requires --debug-failed-chunk-size > 0")
     if isolate_failing_rows and debug_failed_chunk_size <= 0:
         raise ValueError("--isolate-failing-rows requires --debug-failed-chunk-size > 0")
+    # TODO: Make this a configration variable
+    main_orbit_file = Path("./results/main_observations.parquet")
 
     WORK_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -1912,6 +1917,7 @@ def run_ponder(
         db_row_count=total_pts,
     )
 
+    final_job_outputs = []
     if n_new_pts:
         unchanged_done = run_id_set(
             objects,
@@ -1932,6 +1938,7 @@ def run_ponder(
             force_debug_chunking=force_debug_chunking,
             isolate_failing_rows=isolate_failing_rows,
         )
+        final_job_outputs.append(unchanged_done)
     else:
         unchanged_done = True
         if unchanged_ids:
@@ -1956,6 +1963,7 @@ def run_ponder(
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
     )
+    final_job_outputs.append(new_done)
 
     updated_done = run_id_set(
         objects,
@@ -1976,10 +1984,53 @@ def run_ponder(
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
     )
+    final_job_outputs.append(updated_done)
 
-    if not unchanged_done or not new_done or not updated_done:
-        print("  Partial chunk run requested; state not updated")
-        return
+    # check if there's actually a path or a just a fail state
+    final_job_outputs = [output for output in final_job_outputs if output]
+    if not main_orbit_file.exists():
+        # if this is our first run, save concatenated outputs as the main orbit file for the next run to diff against
+        if len(final_job_outputs) == 0:
+            print("No Sorcha jobs were run; skipping main orbit file creation")
+            return
+
+        combined_df = pd.concat(
+            [
+                pd.read_parquet(output.with_name(f"{output.stem}_ew.parquet"))
+                for output in final_job_outputs
+                if isinstance(output, Path) and output.exists()
+            ],
+            ignore_index=True,
+        )
+        time_col = _first_present(combined_df.columns, OUTPUT_TIMESTAMP_COLUMNS)
+        if time_col:
+            combined_df.sort_values(by=time_col, inplace=True)
+        combined_df.to_parquet(main_orbit_file, index=False)
+    else:
+        # otherwise, compare new outputs to the old and change or add them
+        mo_objid_col = _first_present(_csv_columns(main_orbit_file), OUTPUT_ID_COLUMNS)
+        mo_time_col = _first_present(_csv_columns(main_orbit_file), OUTPUT_TIMESTAMP_COLUMNS)
+        main_orbits = pd.read_parquet(main_orbit_file)
+        new_orbits = []
+        filtered_inds = np.zeros(len(main_orbits), dtype=bool)
+        for output in final_job_outputs:
+            if isinstance(output, Path) and output.exists():
+                df = pd.read_parquet(output.with_name(f"{output.stem}_ew.parquet"))
+                df_objid_col = _first_present(df.columns, OUTPUT_ID_COLUMNS)
+                df_time_col = _first_present(df.columns, OUTPUT_TIMESTAMP_COLUMNS)
+                new_orbits.append(df)
+                for i in range(len(main_orbits)):
+                    for j in range(len(df)):
+                        if (filtered_inds[i] == False) and (
+                            (df.iloc[j][df_objid_col] == main_orbits.iloc[i][mo_objid_col])
+                            and (df.iloc[j][df_time_col] == main_orbits.iloc[i][mo_time_col])
+                        ):
+                            filtered_inds[i] = True
+        main_orbits_keep = main_orbits[~filtered_inds]
+        combined_df = pd.concat(new_orbits + [main_orbits_keep], ignore_index=True)
+        if mo_time_col in combined_df.columns:
+            combined_df.sort_values(by=mo_time_col, inplace=True)
+        combined_df.to_parquet(main_orbit_file, index=False)
 
     # -- persist state for next run --
     state["last_mjd"] = db_last_mjd
