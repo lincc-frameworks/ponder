@@ -123,14 +123,114 @@ To inspect quarantined original records, open the sidecar read-only and query
 During an unfinished update, filter by the `active_generation` shown in status
 to inspect the published generation.
 
-This catalog is not yet an input for `ponder --db`. Sorcha-compatible SQLite
-export, DECam footprints, and observing-condition mappings are separate work.
+The DECam prediction workflow below exports this catalog to the SQLite
+`observations` interface used by `ponder --db --ephemeris-only`. It uses archive
+midpoints converted from UTC to TAI and does not invent observing conditions.
 
 Tests run offline against recorded metadata and simulated archive responses.
 To opt into the small live historical-window smoke test:
 
 ```bash
 PONDER_LIVE_NOIRLAB=1 python -m pytest tests/ponder/test_decam_pointings.py -k live_noirlab
+```
+
+## Full DECam predicted-match runs
+
+Install `pip install '.[decam]'` into a dedicated environment. This adapter pins
+Sorcha 1.2.1 because it calls its ephemeris API directly. It bypasses faint-object
+culling, photometry, detection efficiency, and survey-specific filter validation.
+Every archive filter is retained. Matches are nominal orbit predictions within
+1.3 degrees of the exposure center at its midpoint, using observatory W84; the
+0.2-degree generation buffer is removed by an exact spherical-separation cut.
+These are field candidates, not assertions of detection or science-CCD coverage.
+The pinned adapter preserves full midpoint precision when computing TDB and
+clips direction-cosine roundoff locally in Sorcha's angle calculations, avoiding
+its six-decimal JD rounding and NaN rejection of exact field-center matches.
+
+The production location is `/projects/asteroids/COC/ponder/decam`. Preparation and
+prediction should run on compute nodes. Use separate run directories to freeze
+each catalog generation:
+
+```bash
+ponder-decam-pointings --output "$DATA/inputs/decam_pointings.parquet"
+ponder-decam-run stage --run-dir "$RUN" --auxiliary-data "$DATA/auxiliary"
+ponder-decam-run pipeline --run-dir "$RUN" \
+  --catalog "$DATA/inputs/decam_pointings.parquet" \
+  --auxiliary-data "$DATA/auxiliary"
+```
+
+`stage` downloads and freezes the two MPC catalogs, then downloads the Sorcha
+kernels. `pipeline` exports pointings, validates and checkpoints the orbit
+catalogs, prepares observatory geometry, validates a pilot against direct
+integrations, benchmarks full-history checkpoints, and submits production and
+dependent completion jobs. The completion job runs after the array exits,
+automatically retries unfinished tasks up to twice, and publishes only when
+every checkpoint is accounted for. Persistent failures write `needs_attention.json`.
+Run `pipeline` in a Slurm allocation with 8 CPUs,
+32 GB, and up to 48 hours on `trujillo/core`. Production is capped at four
+concurrent allocations of that size. Its measured memory and runtime determine
+the number of worker processes and checkpoints assigned to each task.
+
+The individual stages are also available: `prepare`, `geometry`, `pilot`,
+`benchmark`, `submit`, `worker`, `checkpoint`, `status`, and `finalize`.
+`submit` requires a passing pilot against the same immutable manifest. For an
+interrupted array, `resubmit` retries only unfinished tasks using the saved
+execution manifest, after the previous array exits. It permits two retries;
+inspect failures before proceeding further. Completed checkpoints are verified
+by checksum and reused across dates. Production workers use a frozen copy of
+the Python source. Use that copy through `PYTHONPATH="$RUN/code"` when resuming
+after changing the development checkout.
+
+Invalid exposure geometry, time, duration, or observing date is excluded and
+reported; archive release/update warnings alone do not exclude a pointing.
+Asteroids retain Ponder's default orbit filter. Comets require usable orbital
+elements but no photometry. MPC epochs and perihelion times are interpreted as
+TT and converted to TDB. Separate comet orbit solutions retain separate IDs.
+The 16 massive asteroid perturbers documented as unsupported by Sorcha are
+excluded explicitly. Individual classified propagation failures are isolated
+recursively; resource failures, timeouts, and unclassified errors stop the task
+without mislabeling its orbits as bad. Predictions do not propagate orbital
+uncertainty or model comet non-gravitational accelerations.
+
+The run directory contains:
+
+- `manifest.json`, `environment.txt`, and `inputs/`: frozen sources, input
+  checksums, kernel fingerprints, software versions, converted orbit chunks,
+  and the pointing SQLite database. The full pointing Parquet is preserved.
+- `checkpoints/`: independently resumable predictions, metrics, logs, and
+  explicitly isolated failures. Neither population shares mutable Ponder state.
+- `nightly/YYYY-MM-DD.parquet`: one compressed file per archive observing night,
+  with both populations together. Empty nights have the same typed schema.
+- `nightly_coverage.parquet`, `excluded_exposures.parquet`,
+  `inputs/*/excluded_orbits.jsonl`, `failed_orbits.json`, and `publication.json`:
+  coverage, exclusions, and publication accounting. Original rejected product
+  records with invalid exposure IDs remain in the archive synchronization sidecar.
+
+Nightly files preserve Sorcha ephemeris columns and add `exposure_id`,
+`observing_date`, `object_type` (`comet` or `non_comet`), `orbit_solution_id`,
+`object_designation`, `ponder_catalog_row`, original `filter`, `archive_filename`,
+and `field_separation_deg`. `ObjID` contains the display designation; use
+`(exposure_id, object_type, orbit_solution_id)` as the unique key. Night routing
+uses archive `caldat`, not the UTC date. Source records are joined by exposure
+ID. Publication verifies every checkpoint and unique key through a disk-backed
+ledger, writes each night in batches, and atomically publishes the directory.
+Unfinished tasks block publication; empty files never stand in for unfinished work.
+
+For a single catalog against an exported DECam database:
+
+```bash
+ponder --ephemeris-only --db "$RUN/inputs/pointings.db" \
+  --orbits comets.json.gz --comet --auxiliary-data "$DATA/auxiliary" \
+  --output-dir /path/to/a/new/prediction-run --sorcha-workers 2
+```
+
+Prediction mode uses 250-orbit checkpoints. The existing detection-mode
+configuration and physical-parameter conversion are unchanged. To validate the
+real adapter on a compute node after staging this production run:
+
+```bash
+PONDER_LIVE_SORCHA=1 PONDER_DECAM_DATA="$DATA" \
+  python -m pytest tests/ponder/test_decam_integration.py -v
 ```
 
 ## Running Ponder

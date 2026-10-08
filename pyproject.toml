@@ -23,6 +23,7 @@ dependencies = [
     "tqdm",
     "pyarrow",
     "requests",
+    "ijson",
 ]
 
 [project.urls]
@@ -30,6 +31,7 @@ dependencies = [
 
 # On a mac, install optional dependencies with `pip install '.[dev]'` (include the single quotes)
 [project.optional-dependencies]
+decam = ["sorcha==1.2.1"]
 dev = [
     "black", # Used for static linting of files
     "jupyter", # Clears output from Jupyter notebooks
@@ -70,3 +72,4 @@ omit=["src/ponder/_version.py"]
 ponder = "ponder.__main__:main"
 ponder-consolidate-chunks = "ponder.chunk_cleanup:main"
 ponder-decam-pointings = "ponder.decam_pointings:main"
+ponder-decam-run = "ponder.decam_run:main"
