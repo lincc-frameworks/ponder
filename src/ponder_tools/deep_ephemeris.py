@@ -32,6 +32,22 @@ def read_pointings(path, query):
     return rows.sort_values("observationMidpointMJD_TAI").reset_index(drop=True)
 
 
+def select_circle(joined, radius_deg):
+    """Predictions within radius_deg of their visit's field center, with the separation added.
+
+    A chunk whose objects never come near a pointing has no predictions; it yields an empty,
+    correctly headed table instead of failing in SkyCoord on an empty object array.
+    """
+    joined = joined.copy()
+    if joined.empty:
+        joined["field_separation_deg"] = pd.Series(dtype=float)
+        return joined
+    source = SkyCoord(joined.RA_deg.to_numpy(float) * u.deg, joined.Dec_deg.to_numpy(float) * u.deg)
+    center = SkyCoord(joined.fieldRA_deg.to_numpy(float) * u.deg, joined.fieldDec_deg.to_numpy(float) * u.deg)
+    joined["field_separation_deg"] = source.separation(center).deg
+    return joined.loc[joined.field_separation_deg <= radius_deg]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for arg in ["-c", "--ob", "-p", "--pd", "-o", "--ew", "-t"]:
@@ -85,10 +101,7 @@ def main():
         on="FieldID",
         validate="many_to_one",
     )
-    source = SkyCoord(joined.RA_deg.to_numpy() * u.deg, joined.Dec_deg.to_numpy() * u.deg)
-    center = SkyCoord(joined.fieldRA_deg.to_numpy() * u.deg, joined.fieldDec_deg.to_numpy() * u.deg)
-    joined["field_separation_deg"] = source.separation(center).deg
-    selected = joined.loc[joined.field_separation_deg <= config.fov.circle_radius]
+    selected = select_circle(joined, config.fov.circle_radius)
     selected.to_csv(output / (a.t + ".csv"), index=False)
     print(
         f"DEEP geometry: {len(orbits)} objects, {len(pointings)} visits, "
