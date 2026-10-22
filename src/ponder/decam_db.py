@@ -57,7 +57,8 @@ def export_pointings(catalog, output):
         temporary.unlink(missing_ok=True)
         con = sqlite3.connect(temporary)
         try:
-            con.executescript("""
+            con.executescript(
+                """
                 CREATE TABLE observations (
                     observationId INTEGER PRIMARY KEY, observationStartMJD REAL NOT NULL,
                     observationMidpointMJD_TAI REAL NOT NULL,
@@ -75,7 +76,8 @@ def export_pointings(catalog, output):
                     usable_exposures INTEGER NOT NULL
                 );
                 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
-            """)
+            """
+            )
             counts = {"catalog": 0, "usable": 0, "excluded": 0}
             source = pq.ParquetFile(catalog)
             metadata = {k.decode(): v.decode() for k, v in (source.schema_arrow.metadata or {}).items()}

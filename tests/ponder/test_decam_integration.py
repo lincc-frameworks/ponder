@@ -8,9 +8,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from ponder.decam_pointings import SCHEMA, normalize
-from ponder.decam_run import prepare, geometry, checkpoint, finalize
 from ponder.decam_pilot import pilot
+from ponder.decam_pointings import SCHEMA, normalize
+from ponder.decam_run import checkpoint, finalize, geometry, prepare
 from ponder.predictions import catalog_rows, convert_orbit
 
 

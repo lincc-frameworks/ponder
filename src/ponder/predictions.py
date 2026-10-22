@@ -235,7 +235,8 @@ def prepare_orbits(catalog, output_dir, comet=False, chunk_size=250, filter_orbi
 def sorcha_context(auxiliary, radius=1.3, buffer=0.2):
     # Use only ephemeris configuration: no fake depths, colours or Rubin filter aliases.
     from importlib.metadata import version
-    from sorcha.utilities.sorchaConfigs import simulationConfigs, auxiliaryConfigs
+
+    from sorcha.utilities.sorchaConfigs import auxiliaryConfigs, simulationConfigs
 
     if version("sorcha") != "1.2.1":
         raise RuntimeError("Prediction adapter requires sorcha==1.2.1")
@@ -262,10 +263,10 @@ def sorcha_context(auxiliary, radius=1.3, buffer=0.2):
 
 def prepare_geometry(db, auxiliary, output):
     import spiceypy as spice
-    from sorcha.ephemeris.simulation_setup import create_assist_ephemeris, furnish_spiceypy
+    from sorcha.ephemeris.simulation_constants import AU_KM
     from sorcha.ephemeris.simulation_geometry import barycentricObservatoryRates, ra_dec2vec
     from sorcha.ephemeris.simulation_parsing import Observatory
-    from sorcha.ephemeris.simulation_constants import AU_KM
+    from sorcha.ephemeris.simulation_setup import create_assist_ephemeris, furnish_spiceypy
 
     with read_db(db) as con:
         pointings = pd.read_sql_query(

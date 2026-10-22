@@ -1,12 +1,9 @@
 """Reproducible DECam prediction preparation, Slurm execution and nightly publication."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 import importlib.metadata
 import json
 import os
-from pathlib import Path
 import resource
 import shlex
 import shutil
@@ -14,6 +11,9 @@ import sqlite3
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
@@ -31,7 +31,7 @@ from .predictions import (
     prepare_orbits,
     sorcha_context,
 )
-from .utils import MPCORB_URL, MPCCOM_URL
+from .utils import MPCCOM_URL, MPCORB_URL
 
 THREAD_ENV = {
     key: "1"
@@ -88,10 +88,10 @@ def download(url, path):
 
 
 def stage(run, auxiliary):
+    import spiceypy
     from sorcha.ephemeris.simulation_data_files import make_retriever
     from sorcha.ephemeris.simulation_setup import create_assist_ephemeris, furnish_spiceypy
     from sorcha.utilities.retrieve_ephemeris_data_files import _decompress
-    import spiceypy
 
     run, auxiliary = Path(run).resolve(), Path(auxiliary).resolve()
     run.mkdir(parents=True, exist_ok=True)

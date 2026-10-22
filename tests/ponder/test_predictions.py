@@ -250,6 +250,7 @@ def checkpoint_fixture(tmp_path):
 
 def fake_leaf_success(command, **kwargs):
     from types import SimpleNamespace
+
     from ponder.decam_run import source_hash
 
     orbit_path = Path(command[command.index("--orbits") + 1])
@@ -283,8 +284,9 @@ def test_checkpoint_zero_matches_resumes_without_reexecution(tmp_path, monkeypat
 
 
 def test_checkpoint_infrastructure_failure_is_not_an_orbit_exclusion(tmp_path, monkeypatch):
-    from ponder import decam_run
     from types import SimpleNamespace
+
+    from ponder import decam_run
 
     checkpoint_fixture(tmp_path)
     monkeypatch.setattr(decam_run.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=-9))
@@ -296,8 +298,9 @@ def test_checkpoint_infrastructure_failure_is_not_an_orbit_exclusion(tmp_path, m
 
 
 def test_checkpoint_isolates_only_persistent_individual_failure(tmp_path, monkeypatch):
-    from ponder import decam_run
     from types import SimpleNamespace
+
+    from ponder import decam_run
 
     checkpoint_fixture(tmp_path)
 
@@ -315,8 +318,9 @@ def test_checkpoint_isolates_only_persistent_individual_failure(tmp_path, monkey
 
 
 def test_completion_retries_missing_work_without_canceling_itself(tmp_path, monkeypatch):
-    from ponder import decam_run
     from types import SimpleNamespace
+
+    from ponder import decam_run
 
     checkpoint_fixture(tmp_path)
     atomic_json(tmp_path / "execution.json", {"tasks": [[0]]})

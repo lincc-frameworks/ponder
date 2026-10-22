@@ -212,7 +212,8 @@ def _open_store(path):
     if version not in (0, SCHEMA_VERSION):
         con.close()
         raise ArchiveError(f"Unsupported DECam sidecar schema {version}")
-    con.executescript("""
+    con.executescript(
+        """
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS products (
             generation TEXT NOT NULL, filename TEXT NOT NULL, checksum TEXT NOT NULL,
@@ -230,7 +231,8 @@ def _open_store(path):
             generation TEXT NOT NULL, expnum INTEGER NOT NULL, payload TEXT NOT NULL,
             PRIMARY KEY (generation, expnum)
         );
-    """)
+    """
+    )
     con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     con.commit()
     return con

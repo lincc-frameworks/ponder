@@ -121,7 +121,8 @@ def main():
                 "--config, ignore lists, and forced debug chunking are not supported"
             )
         from concurrent.futures import ThreadPoolExecutor
-        from .decam_run import prepare, geometry, checkpoint, finalize
+
+        from .decam_run import checkpoint, finalize, geometry, prepare
         from .runner import parse_chunk_indices
 
         mode = "comet" if args.comet else "non_comet"

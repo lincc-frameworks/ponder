@@ -1,14 +1,14 @@
 """Compute-node validation against direct integrations without the HEALPix selection."""
 
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
+import astropy.units as u
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from astropy.coordinates import SkyCoord
-import astropy.units as u
 
 from .predictions import (
     EPHEMERIS_COLUMNS,
@@ -23,17 +23,17 @@ from .predictions import (
 
 def direct_ephemeris(orbits, pointings, auxiliary):
     import spiceypy as spice
-    from sorcha.ephemeris.simulation_setup import (
-        create_assist_ephemeris,
-        furnish_spiceypy,
-        generate_simulations,
-    )
     from sorcha.ephemeris.simulation_driver import (
         EphemerisGeometryParameters,
         calculate_rates_and_geometry,
         get_vec,
     )
     from sorcha.ephemeris.simulation_geometry import integrate_light_time
+    from sorcha.ephemeris.simulation_setup import (
+        create_assist_ephemeris,
+        furnish_spiceypy,
+        generate_simulations,
+    )
 
     args, configs = sorcha_context(auxiliary)
     ephem, gm_sun, gm_total = create_assist_ephemeris(args, configs.auxiliary)
@@ -130,9 +130,11 @@ def pilot(run, manifest):
             copy["observationId"] = -(len(synthetic) + 1)
             copy["FieldID"] = str(copy.observationId)
             copy["fieldRA_deg"], copy["fieldDec_deg"] = center.ra.deg, center.dec.deg
-            copy["visit_vector_x"], copy["visit_vector_y"], copy["visit_vector_z"] = (
-                center.cartesian.xyz.value
-            )
+            (
+                copy["visit_vector_x"],
+                copy["visit_vector_y"],
+                copy["visit_vector_z"],
+            ) = center.cartesian.xyz.value
             synthetic.append(copy)
     synthetic = pd.DataFrame(synthetic).sort_values("observationMidpointMJD_TAI").reset_index(drop=True)
     expected_edges = enrich_ephemeris(
