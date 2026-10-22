@@ -26,6 +26,40 @@ Ponder runs Sorcha against an orbit catalog and a pointing database:
 ponder --config ../sorcha_ponder_config.ini --orbits work/asteroid_orbits_04-05-2026.json --db from_rubin_dp1.db
 ```
 
+## Exporting Rubin Pointings
+
+Ponder also ships `ponder-exposures-exporter`, a Ponder-adjacent convenience
+command for querying Rubin Butler exposure records and writing pointing CSVs.
+It scans one or more Butler repos, deduplicates pointings by exposure start
+time, writes a full CSV, writes a reduced export CSV, and can also write a
+Sorcha-formatted observations CSV.
+
+The exporter needs an LSST stack environment with `lsst.daf.butler` available.
+When running from a source checkout, prepend `src` to the existing
+`PYTHONPATH` instead of replacing it so the LSST stack paths remain available:
+
+```bash
+PYTHONPATH=src:$PYTHONPATH python -m ponder_tools.exposures_exporter \
+  --full-csv /path/to/pointing_dbs/pointings_full.csv \
+  --export-csv /path/to/pointing_dbs/pointings_export.csv \
+  --sorcha-csv /path/to/pointing_dbs/pointings_sorcha.csv
+```
+
+After installation, the same command is available as:
+
+```bash
+ponder-exposures-exporter \
+  --full-csv /path/to/pointing_dbs/pointings_full.csv \
+  --export-csv /path/to/pointing_dbs/pointings_export.csv \
+  --sorcha-csv /path/to/pointing_dbs/pointings_sorcha.csv
+```
+
+By default it queries `/repo/dp1`, `dp2_prep`, `embargo`, and `/repo/main` for
+`LSSTCam` and `LSSTComCam`, excludes calibration-like observation types, and
+drops reduced-export rows newer than four days. Use `--repos`, `--instruments`,
+`--only-science`, `--day-obs-min`, `--day-obs-max`, or the cone-search options
+to narrow the export.
+
 For MPCORB asteroid catalogs, Ponder filters the input catalog by default before
 building Sorcha inputs. It keeps objects with semimajor axis greater than 30 au,
 uncertainty code no greater than 6, or an observation arc of at least 3 days. If
