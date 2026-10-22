@@ -1,6 +1,6 @@
 import ponder
-from ponder_tools.exposures_exporter import main as exposures_exporter_main
 from ponder.runner import main
+from ponder_tools.exposures_exporter import main as exposures_exporter_main
 
 
 def test_version():
