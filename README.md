@@ -216,6 +216,58 @@ ID. Publication verifies every checkpoint and unique key through a disk-backed
 ledger, writes each night in batches, and atomically publishes the directory.
 Unfinished tasks block publication; empty files never stand in for unfinished work.
 
+### Columnar publication of large completed runs
+
+For large runs, use `ponder-decam-publish` instead of the legacy SQLite finalizer.
+Stop any existing finalizer first; the two publishers use the same exclusive lock.
+The columnar publisher reads only successful leaf outputs listed in checkpoint
+markers, routes Arrow batches through 64 temporary Parquet partitions, and writes
+one `nightly/YYYY-MM-DD.parquet` per archive night with comets and MPCORB together.
+It does not rerun predictions or create a global merged data file.
+
+Run a representative 128-checkpoint pilot on a compute node before the full run:
+
+```bash
+ponder-decam-publish --run-dir "$RUN" --pilot --workers 4
+ponder-decam-publish --run-dir "$RUN" --workers 4
+```
+
+The pilot includes all comet checkpoints and the recovered DECam checkpoint when
+present. Review `publication_v2/pilot/timing.json`: `passed` requires a projected
+runtime below 24 hours with a factor-of-two margin and estimated total worker
+memory below 24 GiB. Four workers fit an allocation of 8 CPUs and 32 GB. The pilot
+is separate from production, and it does not publish partial science results.
+
+For an existing run whose prediction source was frozen, copy the standalone
+`src/ponder/nightly_publish.py` into a separate `publication_code/` directory and
+execute it with `PYTHONPATH="$RUN/code"`. Do not add it to the frozen `code/ponder`
+package: doing so changes the prediction-source fingerprint. Save its checksum
+and use explicit `--work-dir` directories to distinguish publisher versions.
+
+Map groups and individual nights have checksummed completion records. Repeating
+the same command reuses valid completed work and replaces interrupted temporary
+files. Changed or corrupt committed artifacts stop publication. Nights are
+sorted by exposure, population, and orbit-solution ID; duplicates are errors.
+The publisher reads back each nightly file to verify routing, keys, field radius,
+schema, and population counts, then reconciles all rows before publishing.
+`verification.json` records successful verification; `nightly/SHA256SUMS` supports
+independent transfer checks. Original exclusions and the existing nightly schema
+are preserved.
+
+After full publication passes, transfer the files through a remote staging
+directory and verify SHA-256 checksums before making the destination available:
+
+```bash
+ponder-decam-sync --run-dir "$RUN" \
+  --destination coc123@arnor.astro.washington.edu:/astro/store/shire/coc/pondered/DECam/data/nightly
+```
+
+The transfer resumes partial rsync files, retains identical destination files,
+and refuses conflicting existing content. Small provenance and exclusion reports
+are included in `_provenance/`; `sync_verification.json` on the destination and
+`sync.json` locally record successful remote verification. No unrelated remote
+files are deleted. SSH authentication must work without an interactive prompt.
+
 For a single catalog against an exported DECam database:
 
 ```bash
