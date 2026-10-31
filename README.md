@@ -18,6 +18,273 @@ you whether or not you'd like to display it!
 For more information about the project template see the 
 [documentation](https://lincc-ppt.readthedocs.io/en/latest/).
 
+## Maintaining a DECam pointing catalog
+
+After installing Ponder (`pip install .` from this checkout), run:
+
+```bash
+# First run builds the catalog; subsequent runs update it.
+ponder-decam-pointings --output /path/to/decam_pointings.parquet
+
+# Reconcile the complete archive, including removed or backdated products.
+ponder-decam-pointings --output /path/to/decam_pointings.parquet --full-refresh
+
+# Inspect local freshness, coverage, validation issues, and unfinished work.
+ponder-decam-pointings --output /path/to/decam_pointings.parquet --status
+```
+
+The command uses the anonymous [NOIRLab Astro Data Archive metadata
+API](https://astroarchive.noirlab.edu/api/docs/). It does not download images,
+require a NOIRLab account, or depend on HARVEST's database. The first run queries
+monthly observation-date windows from January 2012 onward and can take a while;
+progress is printed after each completed window. The archive controls which
+metadata are visible, and some visible exposures have images that are still
+proprietary. No public-image release-date cutoff is applied.
+
+The Parquet has one row per `(instrument, exposure_id)`, where `exposure_id` is
+DECam's `EXPNUM`. It includes all filters for `obs_type=object`,
+`proc_type=raw/instcal/resampled`, and `prod_type=image/image1`. Stacks,
+calibration frames, masks, and weights are excluded. Among candidates with valid
+coordinates, timing, and duration, selection prefers `instcal`, then `raw`, then
+`resampled`. Within a processing type it chooses the latest archive update,
+then ascending archive filename and checksum for deterministic ties. This is a
+metadata-selection rule, not a guarantee that a product is the best scientific
+reduction. If all candidates for an exposure have invalid pointing metadata,
+the exposure remains in the catalog with nullable values and `quality_flags`.
+
+Read it directly with pandas:
+
+```python
+import pandas as pd
+
+pointings = pd.read_parquet("/path/to/decam_pointings.parquet")
+usable = pointings[pointings["quality_flags"].map(len) == 0]
+print(usable[["exposure_id", "ra_deg", "dec_deg", "start_mjd_utc", "filter"]])
+```
+
+The stable v1 columns are:
+
+| Columns | Meaning |
+| --- | --- |
+| `instrument`, `exposure_id` | Instrument and positive integer DECam exposure counter |
+| `ra_deg`, `dec_deg` | Archive-provided field center in degrees; not a CCD footprint |
+| `start_utc`, `midpoint_utc` | UTC ISO strings with fractional seconds and `Z`; strings also preserve leap seconds |
+| `start_mjd_utc`, `midpoint_mjd_utc` | Corresponding MJD values in **UTC**, not TAI |
+| `exposure_seconds`, `filter`, `proposal`, `observing_date` | Exposure duration, full original filter string, proposal, local observing-night date |
+| `proc_type`, `release_date`, `archive_updated_utc` | Selected product's processing, image-release date, and archive update time |
+| `archive_filename`, `original_filename`, `md5sum` | Selected product provenance |
+| `source_date_obs`, `source_timesys`, `source_mjd_obs`, `source_dateobs_center` | Source timing values retained as strings |
+| `quality_flags` | List of validation issues, empty when checks pass |
+
+Start time comes from `DATE-OBS` interpreted using `TIMESYS`; midpoint comes
+from the archive's `dateobs_center`. Missing or unknown time systems are flagged
+instead of assumed to be UTC. A midpoint inconsistent with start plus half the
+duration by more than one second is flagged. Exposure numbers that are missing,
+nonintegral, or outside the positive int64 range are quarantined in the sidecar,
+not matched by approximate timestamps. Such excluded products are counted in
+the command summary and `--status`, with up to ten examples in status output.
+Other quality flags identify invalid coordinates, timing, duration, update
+timestamps, or release dates. Review flags before using the catalog scientifically.
+
+### Updates, reconciliation, and recovery
+
+Keep `decam_pointings.parquet.sqlite3` alongside the Parquet. This private
+sidecar stores candidate products, original metadata, validation flags, and
+completed-window checkpoints. Allow disk space for both the published and
+pending generations in SQLite plus a temporary Parquet during export. Parquet
+is written in bounded batches, so the archive need not fit in memory. The
+adjacent `.lock` file prevents simultaneous updaters for the same output path;
+the OS releases the lock after a crash. Do not delete the lock file while an
+updater is running. Use a filesystem with reliable SQLite and file-lock support.
+
+Incremental runs search archive **update dates**, with a seven-day overlap, and
+release dates. This catches metadata corrections, reprocessing, and newly
+visible older observations. Windows are paginated with explicit ordering and
+before/after count checks; incomplete or changing windows are rolled back and
+retried. NOIRLab does not provide a transactional snapshot across requests, so
+these checks cannot detect every simultaneous change. Run `--full-refresh`
+monthly to reconcile removals, backdated changes, and other changes missed by
+the incremental queries. `--status` recommends reconciliation after 30 days.
+The command does not install a schedule.
+
+Rerun the same command after interruption. Completed windows are reused, and
+the previous Parquet remains readable until the replacement is fully written
+and atomically published. A failed export resumes from committed local data
+without contacting NOIRLab. A resumed run uses its original cutoff; run again
+afterward to catch up to the present. An explicit full refresh supersedes an
+unfinished incremental run; an unfinished full refresh resumes normally.
+
+The Parquet footer records the schema version, archive API version, generation,
+sync cutoff, and summary. `--status` reports whether it matches the sidecar. If
+the sidecar is lost, restore it from backup or explicitly use `--full-refresh`
+to rebuild it; the existing Parquet is preserved until rebuilding succeeds.
+To inspect quarantined original records, open the sidecar read-only and query
+`products` with `expnum IS NULL`; its `source` and `payload` columns contain JSON.
+During an unfinished update, filter by the `active_generation` shown in status
+to inspect the published generation.
+
+The DECam prediction workflow below exports this catalog to the SQLite
+`observations` interface used by `ponder --db --ephemeris-only`. It uses archive
+midpoints converted from UTC to TAI and does not invent observing conditions.
+
+Tests run offline against recorded metadata and simulated archive responses.
+To opt into the small live historical-window smoke test:
+
+```bash
+PONDER_LIVE_NOIRLAB=1 python -m pytest tests/ponder/test_decam_pointings.py -k live_noirlab
+```
+
+## Full DECam predicted-match runs
+
+Install `pip install '.[decam]'` into a dedicated environment. This adapter pins
+Sorcha 1.2.1 because it calls its ephemeris API directly. It bypasses faint-object
+culling, photometry, detection efficiency, and survey-specific filter validation.
+Every archive filter is retained. Matches are nominal orbit predictions within
+1.3 degrees of the exposure center at its midpoint, using observatory W84; the
+0.2-degree generation buffer is removed by an exact spherical-separation cut.
+These are field candidates, not assertions of detection or science-CCD coverage.
+The pinned adapter preserves full midpoint precision when computing TDB and
+clips direction-cosine roundoff locally in Sorcha's angle calculations, avoiding
+its six-decimal JD rounding and NaN rejection of exact field-center matches.
+
+The production location is `/projects/asteroids/COC/ponder/decam`. Preparation and
+prediction should run on compute nodes. Use separate run directories to freeze
+each catalog generation:
+
+```bash
+ponder-decam-pointings --output "$DATA/inputs/decam_pointings.parquet"
+ponder-decam-run stage --run-dir "$RUN" --auxiliary-data "$DATA/auxiliary"
+ponder-decam-run pipeline --run-dir "$RUN" \
+  --catalog "$DATA/inputs/decam_pointings.parquet" \
+  --auxiliary-data "$DATA/auxiliary"
+```
+
+`stage` downloads and freezes the two MPC catalogs, then downloads the Sorcha
+kernels. `pipeline` exports pointings, validates and checkpoints the orbit
+catalogs, prepares observatory geometry, validates a pilot against direct
+integrations, benchmarks full-history checkpoints, and submits production and
+dependent completion jobs. The completion job runs after the array exits,
+automatically retries unfinished tasks up to twice, and publishes only when
+every checkpoint is accounted for. Persistent failures write `needs_attention.json`.
+Run `pipeline` in a Slurm allocation with 8 CPUs,
+32 GB, and up to 48 hours on `trujillo/core`. Production is capped at four
+concurrent allocations of that size. Its measured memory and runtime determine
+the number of worker processes and checkpoints assigned to each task.
+
+The individual stages are also available: `prepare`, `geometry`, `pilot`,
+`benchmark`, `submit`, `worker`, `checkpoint`, `status`, and `finalize`.
+`submit` requires a passing pilot against the same immutable manifest. For an
+interrupted array, `resubmit` retries only unfinished tasks using the saved
+execution manifest, after the previous array exits. It permits two retries;
+inspect failures before proceeding further. Completed checkpoints are verified
+by checksum and reused across dates. Production workers use a frozen copy of
+the Python source. Use that copy through `PYTHONPATH="$RUN/code"` when resuming
+after changing the development checkout.
+
+Invalid exposure geometry, time, duration, or observing date is excluded and
+reported; archive release/update warnings alone do not exclude a pointing.
+Asteroids retain Ponder's default orbit filter. Comets require usable orbital
+elements but no photometry. MPC epochs and perihelion times are interpreted as
+TT and converted to TDB. Separate comet orbit solutions retain separate IDs.
+The 16 massive asteroid perturbers documented as unsupported by Sorcha are
+excluded explicitly. Individual classified propagation failures are isolated
+recursively; resource failures, timeouts, and unclassified errors stop the task
+without mislabeling its orbits as bad. Predictions do not propagate orbital
+uncertainty or model comet non-gravitational accelerations.
+
+The run directory contains:
+
+- `manifest.json`, `environment.txt`, and `inputs/`: frozen sources, input
+  checksums, kernel fingerprints, software versions, converted orbit chunks,
+  and the pointing SQLite database. The full pointing Parquet is preserved.
+- `checkpoints/`: independently resumable predictions, metrics, logs, and
+  explicitly isolated failures. Neither population shares mutable Ponder state.
+- `nightly/YYYY-MM-DD.parquet`: one compressed file per archive observing night,
+  with both populations together. Empty nights have the same typed schema.
+- `nightly_coverage.parquet`, `excluded_exposures.parquet`,
+  `inputs/*/excluded_orbits.jsonl`, `failed_orbits.json`, and `publication.json`:
+  coverage, exclusions, and publication accounting. Original rejected product
+  records with invalid exposure IDs remain in the archive synchronization sidecar.
+
+Nightly files preserve Sorcha ephemeris columns and add `exposure_id`,
+`observing_date`, `object_type` (`comet` or `non_comet`), `orbit_solution_id`,
+`object_designation`, `ponder_catalog_row`, original `filter`, `archive_filename`,
+and `field_separation_deg`. `ObjID` contains the display designation; use
+`(exposure_id, object_type, orbit_solution_id)` as the unique key. Night routing
+uses archive `caldat`, not the UTC date. Source records are joined by exposure
+ID. Publication verifies every checkpoint and unique key through a disk-backed
+ledger, writes each night in batches, and atomically publishes the directory.
+Unfinished tasks block publication; empty files never stand in for unfinished work.
+
+### Columnar publication of large completed runs
+
+For large runs, use `ponder-decam-publish` instead of the legacy SQLite finalizer.
+Stop any existing finalizer first; the two publishers use the same exclusive lock.
+The columnar publisher reads only successful leaf outputs listed in checkpoint
+markers, routes Arrow batches through 64 temporary Parquet partitions, and writes
+one `nightly/YYYY-MM-DD.parquet` per archive night with comets and MPCORB together.
+It does not rerun predictions or create a global merged data file.
+
+Run a representative 128-checkpoint pilot on a compute node before the full run:
+
+```bash
+ponder-decam-publish --run-dir "$RUN" --pilot --workers 4
+ponder-decam-publish --run-dir "$RUN" --workers 4
+```
+
+The pilot includes all comet checkpoints and the recovered DECam checkpoint when
+present. Review `publication_v2/pilot/timing.json`: `passed` requires a projected
+runtime below 24 hours with a factor-of-two margin and estimated total worker
+memory below 24 GiB. Four workers fit an allocation of 8 CPUs and 32 GB. The pilot
+is separate from production, and it does not publish partial science results.
+
+For an existing run whose prediction source was frozen, copy the standalone
+`src/ponder/nightly_publish.py` into a separate `publication_code/` directory and
+execute it with `PYTHONPATH="$RUN/code"`. Do not add it to the frozen `code/ponder`
+package: doing so changes the prediction-source fingerprint. Save its checksum
+and use explicit `--work-dir` directories to distinguish publisher versions.
+
+Map groups and individual nights have checksummed completion records. Repeating
+the same command reuses valid completed work and replaces interrupted temporary
+files. Changed or corrupt committed artifacts stop publication. Nights are
+sorted by exposure, population, and orbit-solution ID; duplicates are errors.
+The publisher reads back each nightly file to verify routing, keys, field radius,
+schema, and population counts, then reconciles all rows before publishing.
+`verification.json` records successful verification; `nightly/SHA256SUMS` supports
+independent transfer checks. Original exclusions and the existing nightly schema
+are preserved.
+
+After full publication passes, transfer the files through a remote staging
+directory and verify SHA-256 checksums before making the destination available:
+
+```bash
+ponder-decam-sync --run-dir "$RUN" \
+  --destination coc123@arnor.astro.washington.edu:/astro/store/shire/coc/pondered/DECam/data/nightly
+```
+
+The transfer resumes partial rsync files, retains identical destination files,
+and refuses conflicting existing content. Small provenance and exclusion reports
+are included in `_provenance/`; `sync_verification.json` on the destination and
+`sync.json` locally record successful remote verification. No unrelated remote
+files are deleted. SSH authentication must work without an interactive prompt.
+
+For a single catalog against an exported DECam database:
+
+```bash
+ponder --ephemeris-only --db "$RUN/inputs/pointings.db" \
+  --orbits comets.json.gz --comet --auxiliary-data "$DATA/auxiliary" \
+  --output-dir /path/to/a/new/prediction-run --sorcha-workers 2
+```
+
+Prediction mode uses 250-orbit checkpoints. The existing detection-mode
+configuration and physical-parameter conversion are unchanged. To validate the
+real adapter on a compute node after staging this production run:
+
+```bash
+PONDER_LIVE_SORCHA=1 PONDER_DECAM_DATA="$DATA" \
+  python -m pytest tests/ponder/test_decam_integration.py -v
+```
+
 ## Running Ponder
 
 Ponder runs Sorcha against an orbit catalog and a pointing database:
