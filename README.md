@@ -353,3 +353,9 @@ with full-asteroid or comet runs against the same pointing database.
 ponder --neo --db pointings.db --orbits mpcorb_extended.json --config sorcha.ini \
   --no-filter-orbits
 ```
+
+## Synthetic ISO injection pilot
+
+The opt-in `ponder-synthetic` command prepares the Ōtautahi–Oxford model for
+Sorcha and generates unthresholded per-visit truth. See [SYNTHETIC_ISOS.md](SYNTHETIC_ISOS.md)
+for the scientific contracts, commands, and production validation boundary.
