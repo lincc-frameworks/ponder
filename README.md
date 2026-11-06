@@ -1,6 +1,59 @@
 
 # ponder
 
+### Default MPC comet photometry
+
+Comet runs (`ponder --comet` or `run_ponder(..., comet=True)`) use the MPC comet
+brightness exponent and the Schleicher–Marcus (Halley–Marcus) dust phase function
+by default. Asteroid runs retain their existing photometry. Select
+`--comet-photometry legacy` explicitly to reproduce the old distance-only law.
+
+Ponder requires sorcha-addons. Until the new model is released, install **the
+sorcha-addons checkout containing `activity/mpc_comet`** into the same Python
+environment as Ponder; an older add-ons release is insufficient. Ponder checks
+for the model before starting a comet run and reports an error if it is missing.
+For a local checkout:
+
+```bash
+python -m pip install -e /path/to/sorcha-addons
+ponder --comet \
+  --config /path/to/sorcha.ini --orbits /path/to/comets.json \
+  --db /path/to/pointings.db --work-dir /path/to/work --results-dir /path/to/results
+```
+
+The add-on computes
+`m = H_filter + 5 log10(delta) + 2.5 G log10(r_h) - 2.5 log10(Phi_HM(alpha))`
+inside Sorcha, before observational noise and selection. Ponder treats MPC `H` as `H_r`, preserves `g-r = 0.5`, and supplies
+fixed colors for the other Rubin bands (`u-r = 1.8`, `i-r = -0.2`,
+`z-r = -0.3`, `y-r = -0.4`). The catalog `G` is the comet
+heliocentric exponent, **not** asteroid `GS`. Missing/nonfinite `G` becomes 4;
+`comet_G_assumed` flags this in each `*_physparams_complex.csv` alongside the
+actual `comet_G`. Missing H stays unknown. Those columns are also available
+in Sorcha's `output_columns = all` output.
+
+Ponder derives an effective configuration with `comet_activity = mpc_hm`,
+`phase_function = none`, and `brute_force = True` (no early faint-object cull).
+Conflicting phase, activity, or rotational-lightcurve settings are rejected.
+Comet runs bypass the saturation cut. Subsequent detection
+filters remain as configured; disable magnitude/SNR, fading, and linking cuts
+and observational effects to retain unknown magnitudes in geometry-only output.
+
+New-model work and results are isolated below each supplied root in
+`photometry/mpc-hm-<signature>/`. The signature includes the add-on implementation,
+model version, input configuration, color assumptions, and numerical dependency versions. The result directory contains
+`photometry.json` with those details and the effective-config path. State files live in the model-specific work directory and
+are separately keyed, so the first default comet run processes full history without reusing legacy
+completion state. Changes to H/G also trigger historical
+reruns. Use the model-specific results directory when consuming or publishing results.
+
+This first-order total-magnitude model assumes dust-dominated light and treats H
+as a zero-phase normalization. Catalog H/G may already absorb phase or aperture
+effects. It does not recalibrate bands, model outbursts/gas emission, or convert
+integrated coma brightness to point-source photometry. See the add-on's
+`docs/community_modules/activity/mpc_comet.rst` for references and examples.
+
+
+
 
 
 [![Template](https://img.shields.io/badge/Template-LINCC%20Frameworks%20Python%20Project%20Template-brightgreen)](https://lincc-ppt.readthedocs.io/en/latest/)

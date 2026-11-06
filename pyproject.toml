@@ -20,6 +20,7 @@ dependencies = [
     "astropy",
     "pandas < 3.0",
     "sorcha",
+    "sorcha-addons",
     "tqdm",
     "pyarrow",
 ]
