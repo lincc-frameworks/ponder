@@ -20,6 +20,8 @@ dependencies = [
     "astropy",
     "pandas < 3.0",
     "sorcha",
+    # Sorcha leaves ASSIST unpinned. 1.2.3 is the first release that also caps REBOUND below 5.
+    "assist >= 1.2.3",
     "tqdm",
     "pyarrow",
 ]
