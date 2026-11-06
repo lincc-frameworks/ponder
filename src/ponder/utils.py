@@ -8,6 +8,8 @@ import pandas as pd
 import requests
 from astropy.time import Time
 
+from .comet_photometry import comet_slopes, validate_model
+
 # orbital element fields - a change in any of these triggers a full-history rerun
 ORBIT_FIELDS = [
     "e",
@@ -61,12 +63,13 @@ def obj_id(comet):
     )
 
 
-def hash_orbit(comet):
-    key = "|".join(str(comet.get(f, "")) for f in ORBIT_FIELDS)
+def hash_orbit(comet, include_photometry=False):
+    fields = ORBIT_FIELDS + (["H", "G"] if include_photometry else [])
+    key = "|".join(str(comet.get(f, "")) for f in fields)
     return hashlib.md5(key.encode()).hexdigest()
 
 
-def diff_objects(objects, prev_hashes):
+def diff_objects(objects, prev_hashes, include_photometry=False):
     """
     Given a list of objects and a dict of previous comet hashes, return lists of new, updated, and unchanged comets.
 
@@ -78,7 +81,7 @@ def diff_objects(objects, prev_hashes):
     new, updated, unchanged = [], [], []
     for c in objects:
         oid = obj_id(c)
-        h = hash_orbit(c)
+        h = hash_orbit(c, include_photometry=include_photometry)
         if oid not in prev_hashes:
             new.append(oid)
         elif prev_hashes[oid] != h:
@@ -307,7 +310,8 @@ def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
 # -- comet -> sorcha format converters --
 
 
-def comets_to_sorcha_inputs(comets_json, ids):
+def comets_to_sorcha_inputs(comets_json, ids, comet_photometry="mpc-hm"):
+    validate_model(comet_photometry)
     # TODO: potentially refactor so that it only does the conversion once
     df = pd.DataFrame(comets_json)
 
@@ -384,6 +388,11 @@ def comets_to_sorcha_inputs(comets_json, ids):
         }
     )
     phys = add_default_sorcha_physical_columns(phys)
+    if comet_photometry == "mpc-hm":
+        phys["H_r"] = phys["H_r"].where(phys["H_r"].map(math.isfinite))
+        slope, assumed = comet_slopes(df)
+        phys["comet_G"] = slope.to_numpy()
+        phys["comet_G_assumed"] = assumed.to_numpy()
     # phys.to_csv(physparams_out, index=False)
 
     return orbs, phys

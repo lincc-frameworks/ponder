@@ -92,3 +92,41 @@ def test_empty_summary_uses_same_output_schema():
     result = REPORT.summarize_rows(pd.DataFrame())
 
     assert result.columns.tolist() == REPORT.SUMMARY_COLUMNS
+
+
+def test_comet_report_uses_addon_and_preserves_unknown_h(tmp_path, monkeypatch):
+    import numpy as np
+
+    mpc_comet_magnitude = pytest.importorskip("sorcha_addons.activity.mpc_comet").mpc_comet_magnitude
+    catalog = tmp_path / "comets.json"
+    catalog.write_text(
+        json.dumps(
+            [
+                {"Designation_and_name": "A", "H": 12.0, "G": 6.0},
+                {"Designation_and_name": "B", "H": None},
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        REPORT,
+        "read_pointing_metadata",
+        lambda _: pd.DataFrame(
+            {
+                "FieldID": [1],
+                "band": ["g_01"],
+            }
+        ),
+    )
+    ephem = pd.DataFrame(
+        {
+            "ObjID": ["A", "B"],
+            "FieldID": [1, 1],
+            "rH_au": [2.0, 2.0],
+            "delta_au": [2.0, 2.0],
+            "phase_deg": [29.0, 29.0],
+        }
+    )
+    out = REPORT.add_observation_metadata(ephem, tmp_path / "db", catalog, "comet", "mpc-hm")
+    assert out.apparent_mag.iloc[0] == pytest.approx(mpc_comet_magnitude(12.5, 6, 2, 2, 29))
+    assert np.isnan(out.apparent_mag.iloc[1])
+    assert out.comet_G_assumed.tolist() == [False, True]

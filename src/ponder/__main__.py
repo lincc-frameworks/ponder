@@ -10,6 +10,7 @@ from .runner import (
     run_ponder,
 )
 from .utils import get_current_orbits
+from .comet_photometry import COMET_PHOTOMETRY_CHOICES, resolve_model
 
 
 def main():
@@ -18,8 +19,12 @@ def main():
     parser.add_argument("--orbits", type=Path, help="Path to the orbits JSON file")
     parser.add_argument("--config", type=Path, help="Path to the configuration file")
     population = parser.add_mutually_exclusive_group()
-    population.add_argument(
-        "--comet", action="store_true", help="Run the MPC comet population"
+    population.add_argument("--comet", action="store_true", help="Run the MPC comet population")
+    parser.add_argument(
+        "--comet-photometry",
+        choices=COMET_PHOTOMETRY_CHOICES,
+        default=None,
+        help="Comet magnitude model (default for --comet: mpc-hm; legacy restores the distance-only law).",
     )
     population.add_argument(
         "--neo",
@@ -120,6 +125,7 @@ def main():
     )
 
     args = parser.parse_args()
+    args.comet_photometry = resolve_model(args.comet_photometry, comet=args.comet)
     orbit_path = args.orbits
     if args.download_orbits:
         date_str = datetime.now(timezone.utc).strftime("%d-%m-%Y")
@@ -129,9 +135,7 @@ def main():
         return
     if args.db is None:
         if args.download_orbits:
-            print(
-                f"No database supplied; downloaded orbits to {orbit_path}. Skipping Ponder analysis."
-            )
+            print(f"No database supplied; downloaded orbits to {orbit_path}. Skipping Ponder analysis.")
         else:
             print("Error: Must provide --db to run Ponder analysis")
         return
@@ -161,6 +165,7 @@ def main():
         work_dir=args.work_dir,
         results_dir=args.results_dir,
         neo=args.neo,
+        comet_photometry=args.comet_photometry,
     )
 
 

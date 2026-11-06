@@ -13,7 +13,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ponder.utils import SORCHA_DEFAULT_COLOR_OFFSETS, format_rubin_filter_list, rubin_band
+from ponder.comet_photometry import comet_slopes, configured_model, validate_model
+
+from ponder.utils import (
+    SORCHA_DEFAULT_COLOR_OFFSETS,
+    format_rubin_filter_list,
+    rubin_band,
+)
 
 AU_KM = 149597870.700
 DETECTION_COLUMNS = [
@@ -51,17 +57,23 @@ def read_detections(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, usecols=lambda column: column in DETECTION_COLUMNS)
 
 
-def read_orbits(path: Path, object_mode: str) -> pd.DataFrame:
+def read_orbits(path: Path, object_mode: str, comet_photometry: str = "legacy") -> pd.DataFrame:
     open_func = gzip.open if path.suffix == ".gz" else open
     with open_func(path, "rt") as handle:
         objects = json.load(handle)
     df = pd.DataFrame(objects)
     id_column = "Principal_desig" if object_mode == "asteroid" else "Designation_and_name"
-    missing = [column for column in [id_column, "H"] if column not in df]
+    missing = [column for column in [id_column] if column not in df]
     if missing:
         raise KeyError(f"Orbit catalog is missing columns required for {object_mode} mode: {missing}")
+    df["H"] = pd.to_numeric(df.reindex(columns=["H"])["H"], errors="coerce")
+    df["H"] = df["H"].where(np.isfinite(df["H"]))
+    columns = [id_column, "H"]
+    if comet_photometry == "mpc-hm":
+        df["comet_G"], df["comet_G_assumed"] = comet_slopes(df)
+        columns += ["comet_G", "comet_G_assumed"]
     return (
-        df[[id_column, "H"]]
+        df[columns]
         .rename(columns={id_column: "ObjID", "H": "H_r"})
         .dropna(subset=["ObjID"])
         .drop_duplicates("ObjID")
@@ -71,7 +83,8 @@ def read_orbits(path: Path, object_mode: str) -> pd.DataFrame:
 def read_pointing_metadata(db_path: Path) -> pd.DataFrame:
     with sqlite3.connect(db_path) as con:
         out = pd.read_sql_query(
-            "SELECT observationId AS FieldID, band, fieldRA, fieldDec FROM observations", con
+            "SELECT observationId AS FieldID, band, fieldRA, fieldDec FROM observations",
+            con,
         )
     out["local_obsnight"] = (out["FieldID"].astype("int64") // 100000).astype("int64")
     return out
@@ -101,9 +114,8 @@ def filter_to_circle(ephem: pd.DataFrame, radius_deg: float) -> pd.DataFrame:
     object_dec = np.radians(pd.to_numeric(ephem["Dec_deg"], errors="coerce"))
     field_ra = np.radians(pd.to_numeric(ephem["fieldRA"], errors="coerce"))
     field_dec = np.radians(pd.to_numeric(ephem["fieldDec"], errors="coerce"))
-    cosine = (
-        np.sin(object_dec) * np.sin(field_dec)
-        + np.cos(object_dec) * np.cos(field_dec) * np.cos(object_ra - field_ra)
+    cosine = np.sin(object_dec) * np.sin(field_dec) + np.cos(object_dec) * np.cos(field_dec) * np.cos(
+        object_ra - field_ra
     )
     out = ephem.copy()
     out["fov_separation_deg"] = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
@@ -114,9 +126,7 @@ def add_distances(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "Obj_Sun_LTC_km" not in out:
         out["Obj_Sun_LTC_km"] = np.sqrt(
-            out["Obj_Sun_x_LTC_km"] ** 2
-            + out["Obj_Sun_y_LTC_km"] ** 2
-            + out["Obj_Sun_z_LTC_km"] ** 2
+            out["Obj_Sun_x_LTC_km"] ** 2 + out["Obj_Sun_y_LTC_km"] ** 2 + out["Obj_Sun_z_LTC_km"] ** 2
         )
     out["rH_au"] = out["Obj_Sun_LTC_km"] / AU_KM
     out["delta_au"] = out["Range_LTC_km"] / AU_KM
@@ -124,17 +134,31 @@ def add_distances(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_observation_metadata(
-    ephem: pd.DataFrame, db_path: Path, orbits_path: Path, object_mode: str
+    ephem: pd.DataFrame,
+    db_path: Path,
+    orbits_path: Path,
+    object_mode: str,
+    comet_photometry: str = "legacy",
 ) -> pd.DataFrame:
+    validate_model(comet_photometry, object_mode == "comet")
     out = ephem.merge(read_pointing_metadata(db_path), on="FieldID", how="left")
-    out = out.merge(read_orbits(orbits_path, object_mode), on="ObjID", how="left")
+    out = out.merge(read_orbits(orbits_path, object_mode, comet_photometry), on="ObjID", how="left")
     offsets = {"r-r": 0.0, **SORCHA_DEFAULT_COLOR_OFFSETS}
     out["filter_band"] = out["band"].map(rubin_band)
     out["color_offset"] = out["filter_band"].map(lambda band: offsets.get(f"{band}-r", np.nan))
     out["H_filter"] = out["H_r"] + out["color_offset"]
-    out["apparent_mag"] = out["H_filter"] + 5.0 * np.log10(out["rH_au"]) + 5.0 * np.log10(
-        out["delta_au"]
-    )
+    if comet_photometry == "mpc-hm":
+        from sorcha_addons.activity.mpc_comet import mpc_comet_magnitude
+
+        out["apparent_mag"] = mpc_comet_magnitude(
+            out["H_filter"],
+            out["comet_G"],
+            out["rH_au"],
+            out["delta_au"],
+            out["phase_deg"],
+        )
+    else:
+        out["apparent_mag"] = out["H_filter"] + 5.0 * np.log10(out["rH_au"]) + 5.0 * np.log10(out["delta_au"])
     return out
 
 
@@ -187,7 +211,10 @@ def summarize_rows(df: pd.DataFrame) -> pd.DataFrame:
             possible_image_count=("FieldID", "count"),
             mean_rH_au=("rH_au", "mean"),
             mean_apparent_mag=("apparent_mag", "mean"),
-            mean_positional_uncertainty_arcsec=("positional_uncertainty_arcsec", "mean"),
+            mean_positional_uncertainty_arcsec=(
+                "positional_uncertainty_arcsec",
+                "mean",
+            ),
             first_local_obsnight=("local_obsnight", "min"),
             last_local_obsnight=("local_obsnight", "max"),
             min_rH_au=("rH_au", "min"),
@@ -196,10 +223,16 @@ def summarize_rows(df: pd.DataFrame) -> pd.DataFrame:
                 "filter_band",
                 lambda values: format_rubin_filter_list(values),
             ),
-            physical_filters=("band", lambda values: format_rubin_filter_list(values, normalize=False)),
+            physical_filters=(
+                "band",
+                lambda values: format_rubin_filter_list(values, normalize=False),
+            ),
         )
         .reset_index()
-        .sort_values(["possible_image_count", "mean_rH_au", "ObjID"], ascending=[False, False, True])
+        .sort_values(
+            ["possible_image_count", "mean_rH_au", "ObjID"],
+            ascending=[False, False, True],
+        )
     )
     return summary[SUMMARY_COLUMNS]
 
@@ -243,6 +276,7 @@ def write_markdown(
     lt5: pd.DataFrame,
     gt5: pd.DataFrame,
     ge5: pd.DataFrame,
+    comet_photometry: str = "legacy",
 ) -> None:
     lines = [
         "# DP1 rH > 5 au Ponder Summary",
@@ -256,7 +290,7 @@ def write_markdown(
         f"- Circular FOV radius: `{fov_radius_deg:.6f} deg` (strict `<` cut)",
         f"- Buffered ephemeris rows before FOV cut: {pre_fov_rows:,}",
         f"- In-FOV ephemeris rows after FOV cut: {post_fov_rows:,}",
-        "- Apparent magnitude is derived with Sorcha's `phase_function = none` formula and Ponder's fixed color offsets.",
+        f"- Apparent magnitude model: `{comet_photometry}` with Ponder's fixed color offsets.",
         "- Positional uncertainty is the mean matched Ponder `astrometricSigma_deg` value converted to arcseconds.",
         f"- Matched positional uncertainty is available for {gt5['mean_positional_uncertainty_arcsec'].notna().sum():,} of {len(gt5):,} `rH > 5 au` objects.",
         f"- Unique objects before the `5 au` cutoff: {len(all_objects):,}",
@@ -316,7 +350,9 @@ def main() -> int:
     detections_path = args.detections or infer_detections_path(args.ephemeris)
     fov_radius_deg = read_circle_radius(args.config)
     ephem = add_distances(read_ephemeris(args.ephemeris))
-    ephem = add_observation_metadata(ephem, args.db, args.orbits, args.object_mode)
+    photometry = configured_model(args.config)
+    validate_model(photometry, args.object_mode == "comet")
+    ephem = add_observation_metadata(ephem, args.db, args.orbits, args.object_mode, photometry)
     pre_fov_rows = len(ephem)
     ephem = filter_to_circle(ephem, fov_radius_deg)
     ephem["object_mode"] = args.object_mode
@@ -352,6 +388,7 @@ def main() -> int:
         lt5=lt5,
         gt5=gt5,
         ge5=ge5,
+        comet_photometry=photometry,
     )
 
     print(f"Wrote {all_path} ({len(all_objects):,} objects)")

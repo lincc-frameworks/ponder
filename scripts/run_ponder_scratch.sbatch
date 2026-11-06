@@ -26,6 +26,7 @@ DOWNLOAD_ORBITS="${DOWNLOAD_ORBITS:-1}"
 ORBITS="${ORBITS:-}"
 ONLY_CHUNKS="${ONLY_CHUNKS:-}"
 COMET="${COMET:-0}"
+COMET_PHOTOMETRY="${COMET_PHOTOMETRY:-mpc-hm}"
 NO_FILTER_ORBITS="${NO_FILTER_ORBITS:-0}"
 
 if [[ "${COMET}" == "1" ]]; then
@@ -55,6 +56,9 @@ echo "config=${PONDER_CONFIG}"
 echo "work_dir=${PONDER_WORK_DIR}"
 echo "results_dir=${PONDER_RESULTS_DIR}"
 echo "object_mode=${OBJECT_MODE}"
+if [[ "${COMET}" == "1" ]]; then
+  echo "comet_photometry=${COMET_PHOTOMETRY}"
+fi
 echo "update_mode=${UPDATE_MODE}"
 echo "chunk_size=${CHUNK_SIZE}"
 echo "sorcha_workers=${SORCHA_WORKERS}"
@@ -99,7 +103,7 @@ if [[ -n "${ONLY_CHUNKS}" ]]; then
 fi
 
 if [[ "${COMET}" == "1" ]]; then
-  command+=(--comet)
+  command+=(--comet --comet-photometry "${COMET_PHOTOMETRY}")
 fi
 
 if [[ "${NO_FILTER_ORBITS}" == "1" ]]; then

@@ -15,6 +15,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .comet_photometry import resolve_results_directory
 from .runner import OBJECT_MODE_ASTEROID, OBJECT_MODE_COMET, OBJECT_MODES
 
 
@@ -48,7 +49,7 @@ def discover_audited_runs(
     if object_mode not in OBJECT_MODES:
         raise ValueError(f"Unknown object mode: {object_mode}")
 
-    root = Path(results_dir).expanduser().resolve()
+    root = resolve_results_directory(results_dir)
     runs: list[AuditedRun] = []
     for audit_path in sorted(root.glob("chunk_runs/*_job_new_*/output_audit.csv")):
         try:

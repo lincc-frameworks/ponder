@@ -385,7 +385,7 @@ def test_prepare_sorcha_config_disables_saturation_only_for_comets(tmp_path):
     )
 
     effective = runner.prepare_sorcha_config_for_mode(
-        config_path, comet=True, work_dir=tmp_path
+        config_path, comet=True, work_dir=tmp_path, comet_photometry="legacy"
     )
     content = effective.read_text()
     assert effective.name == "sorcha_comet_no_bright_limit.ini"

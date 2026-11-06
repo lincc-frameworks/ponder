@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rubin_comet_catchers import ponder_nightly_updates as updates
+from ponder.comet_photometry import resolve_results_directory
 
 
 def _defer_unified(nightly_dir: str | Path, **_kwargs) -> tuple[Path, int]:
@@ -29,7 +30,7 @@ def main() -> None:
     ):
         summary = updates.update_ponder_nightlies(
             data_root=args.data_root,
-            ponder_results_dir=args.ponder_results_dir,
+            ponder_results_dir=resolve_results_directory(args.ponder_results_dir),
             start_obsnight=args.start_obsnight,
             end_obsnight=args.end_obsnight,
             ledger_path=args.ledger,
