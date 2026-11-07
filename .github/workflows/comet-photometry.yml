@@ -1,0 +1,25 @@
+name: Comet photometry integration
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  comet-photometry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v7
+      - name: Install Ponder and its pinned add-on
+        run: uv pip install --system -e '.[dev]'
+      - name: Verify add-on availability and run tests
+        run: |
+          python -c 'from sorcha_addons.activity.mpc_comet import MPCCometActivity'
+          python -m pytest tests -q

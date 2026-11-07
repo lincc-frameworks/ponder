@@ -1,5 +1,6 @@
 import gzip
 import hashlib
+import math
 import re
 import sqlite3
 
@@ -7,6 +8,8 @@ import numpy as np
 import pandas as pd
 import requests
 from astropy.time import Time
+
+from .comet_photometry import comet_slopes, validate_model
 
 # orbital element fields - a change in any of these triggers a full-history rerun
 ORBIT_FIELDS = [
@@ -30,6 +33,24 @@ MPCORB_UNCERTAINTY_CODE_LIMIT = 6
 MPCORB_OBSERVATION_ARC_LIMIT_DAYS = 3.0
 
 
+SORCHA_DEFAULT_GS = 0.15
+SORCHA_DEFAULT_COLOR_OFFSETS = {
+    "u-r": 1.8,
+    "g-r": 0.5,
+    "i-r": -0.2,
+    "z-r": -0.3,
+    "y-r": -0.4,
+}
+COMET_REQUIRED_INPUT_COLUMNS = (
+    "Epoch_year",
+    "Epoch_month",
+    "Epoch_day",
+    "Year_of_perihelion",
+    "Month_of_perihelion",
+    "Day_of_perihelion",
+)
+
+
 # -- comet diff helpers --
 
 
@@ -41,12 +62,13 @@ def obj_id(comet):
     )
 
 
-def hash_orbit(comet):
-    key = "|".join(str(comet.get(f, "")) for f in ORBIT_FIELDS)
+def hash_orbit(comet, include_photometry=False):
+    fields = ORBIT_FIELDS + (["H", "G"] if include_photometry else [])
+    key = "|".join(str(comet.get(f, "")) for f in fields)
     return hashlib.md5(key.encode()).hexdigest()
 
 
-def diff_objects(objects, prev_hashes):
+def diff_objects(objects, prev_hashes, include_photometry=False):
     """
     Given a list of objects and a dict of previous comet hashes, return lists of new, updated, and unchanged comets.
 
@@ -58,7 +80,7 @@ def diff_objects(objects, prev_hashes):
     new, updated, unchanged = [], [], []
     for c in objects:
         oid = obj_id(c)
-        h = hash_orbit(c)
+        h = hash_orbit(c, include_photometry=include_photometry)
         if oid not in prev_hashes:
             new.append(oid)
         elif prev_hashes[oid] != h:
@@ -205,7 +227,21 @@ def mpcorb_to_sorcha_inputs(mpcorb_json, ids):
 # -- comet -> sorcha format converters --
 
 
-def comets_to_sorcha_inputs(comets_json, ids):
+def valid_comet_sorcha_row(obj):
+    """Return whether an MPC comet row has every value required by Sorcha."""
+    return not any(_is_missing(obj.get(column)) for column in COMET_REQUIRED_INPUT_COLUMNS)
+
+
+def add_default_sorcha_physical_columns(phys):
+    """Add generic colour columns needed for all Rubin filters in Sorcha."""
+    phys["GS"] = SORCHA_DEFAULT_GS
+    for column, value in SORCHA_DEFAULT_COLOR_OFFSETS.items():
+        phys[column] = value
+    return phys
+
+
+def comets_to_sorcha_inputs(comets_json, ids, comet_photometry="mpc-hm"):
+    validate_model(comet_photometry)
     # TODO: potentially refactor so that it only does the conversion once
     df = pd.DataFrame(comets_json)
 
@@ -215,20 +251,11 @@ def comets_to_sorcha_inputs(comets_json, ids):
     )
     df = df[id_col.isin(ids)].copy()
 
-    # build epoch and perihelion MJD strings, dropping rows with missing epochs
+    # Build epoch and perihelion MJD strings, dropping rows that cannot form a
+    # complete Sorcha orbit/physical-parameter pair.
     epoch_strings, tp_strings, bad = [], [], []
     for r, row in df.iterrows():
-        if any(
-            pd.isna(row.get(c))
-            for c in [
-                "Epoch_year",
-                "Epoch_month",
-                "Epoch_day",
-                "Year_of_perihelion",
-                "Month_of_perihelion",
-                "Day_of_perihelion",
-            ]
-        ):
+        if not valid_comet_sorcha_row(row):
             # print(f"  [warn] dropping bad epoch: {row.get('Designation_and_name')}")
             bad.append(r)
             continue
@@ -243,8 +270,12 @@ def comets_to_sorcha_inputs(comets_json, ids):
 
     df = df.drop(bad).reset_index(drop=True)
 
-    df["epochMJD_TDB"] = Time(epoch_strings).mjd
-    df["t_p_MJD_TDB"] = Time([s for s, _ in tp_strings], format="iso").mjd + [f for _, f in tp_strings]
+    if df.empty:
+        df["epochMJD_TDB"] = pd.Series(dtype=float)
+        df["t_p_MJD_TDB"] = pd.Series(dtype=float)
+    else:
+        df["epochMJD_TDB"] = Time(epoch_strings).mjd
+        df["t_p_MJD_TDB"] = Time([s for s, _ in tp_strings], format="iso").mjd + [f for _, f in tp_strings]
     df["FORMAT"] = "COM"
 
     # -- orbits file --
@@ -275,10 +306,18 @@ def comets_to_sorcha_inputs(comets_json, ids):
     phys = pd.DataFrame(
         {
             "ObjID": orbs["ObjID"],
-            "H_r": df["H"].values,
-            "g-r": 0.5,
+            # Brightness is not an orbit requirement. Preserve unknown H as
+            # NaN; geometry-only Sorcha configurations can retain these rows.
+            "H_r": pd.to_numeric(df.reindex(columns=["H"])["H"], errors="coerce").values,
         }
     )
+    phys["g-r"] = 0.5
+    if comet_photometry == "mpc-hm":
+        phys = add_default_sorcha_physical_columns(phys)
+        phys["H_r"] = phys["H_r"].where(phys["H_r"].map(math.isfinite))
+        slope, assumed = comet_slopes(df)
+        phys["comet_G"] = slope.to_numpy()
+        phys["comet_G_assumed"] = assumed.to_numpy()
     # phys.to_csv(physparams_out, index=False)
 
     return orbs, phys
