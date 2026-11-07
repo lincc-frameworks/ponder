@@ -20,7 +20,8 @@ dependencies = [
     "astropy",
     "pandas < 3.0",
     "sorcha",
-    "sorcha-addons",
+    # Temporary source pin until the MPC comet model is released upstream.
+    "sorcha-addons @ git+https://github.com/ColinOrionChandler/sorcha-addons.git@7cfc0e9f173cc194379991f75d468c4cc482cd13",
     "tqdm",
     "pyarrow",
 ]

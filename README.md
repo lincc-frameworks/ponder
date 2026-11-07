@@ -8,18 +8,20 @@ brightness exponent and the Schleicher–Marcus (Halley–Marcus) dust phase fun
 by default. Asteroid runs retain their existing photometry. Select
 `--comet-photometry legacy` explicitly to reproduce the old distance-only law.
 
-Ponder requires sorcha-addons. Until the new model is released, install **the
-sorcha-addons checkout containing `activity/mpc_comet`** into the same Python
-environment as Ponder; an older add-ons release is insufficient. Ponder checks
-for the model before starting a comet run and reports an error if it is missing.
-For a local checkout:
+Ponder temporarily pins sorcha-addons to the tested commit containing
+`activity/mpc_comet`. Installing this Ponder branch installs that exact add-on
+revision automatically (Git and network access are required):
 
 ```bash
-python -m pip install -e /path/to/sorcha-addons
+python -m pip install -e .
 ponder --comet \
   --config /path/to/sorcha.ini --orbits /path/to/comets.json \
   --db /path/to/pointings.db --work-dir /path/to/work --results-dir /path/to/results
 ```
+
+Replace the source pin with a released minimum version once the model is
+available upstream, before publishing a Ponder package release. Ponder checks
+for the model before starting a comet run and reports an error if it is missing.
 
 The add-on computes
 `m = H_filter + 5 log10(delta) + 2.5 G log10(r_h) - 2.5 log10(Phi_HM(alpha))`
@@ -49,7 +51,11 @@ reruns. Use the model-specific results directory when consuming or publishing re
 This first-order total-magnitude model assumes dust-dominated light and treats H
 as a zero-phase normalization. Catalog H/G may already absorb phase or aperture
 effects. It does not recalibrate bands, model outbursts/gas emission, or convert
-integrated coma brightness to point-source photometry. See the add-on's
+integrated coma brightness to point-source photometry. Steep catalog slopes
+extrapolated to large heliocentric distances can predict extremely faint total
+magnitudes; this model has no separate nucleus contribution. Numerical and
+integration tests verify the calculation, but its accuracy against observed
+comet photometry has not yet been established. See the add-on's
 `docs/community_modules/activity/mpc_comet.rst` for references and examples.
 
 

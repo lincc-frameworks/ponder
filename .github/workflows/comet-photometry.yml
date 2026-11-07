@@ -17,12 +17,8 @@ jobs:
         with:
           python-version: '3.13'
       - uses: astral-sh/setup-uv@v7
-      - name: Install companion add-on and Ponder
-        # Temporary immutable dependency for the draft PR. Replace with the
-        # released sorcha-addons minimum version before merging the default.
-        run: |
-          uv pip install --system 'sorcha-addons @ git+https://github.com/ColinOrionChandler/sorcha-addons.git@7cfc0e9f173cc194379991f75d468c4cc482cd13'
-          uv pip install --system -e '.[dev]'
+      - name: Install Ponder and its pinned add-on
+        run: uv pip install --system -e '.[dev]'
       - name: Verify add-on availability and run tests
         run: |
           python -c 'from sorcha_addons.activity.mpc_comet import MPCCometActivity'
