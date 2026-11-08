@@ -40,6 +40,14 @@ Comet runs bypass the saturation cut. Subsequent detection
 filters remain as configured; disable magnitude/SNR, fading, and linking cuts
 and observational effects to retain unknown magnitudes in geometry-only output.
 
+**For completeness-focused comet searches, consider retaining all geometrically
+eligible comets without excluding any on predicted magnitude, including unknown
+magnitudes.** Catalog H/G uncertainties can produce errors of many magnitudes.
+The default comet model does not disable all downstream selection. See the
+[comet photometry guidance](docs/comet-photometry.md) for configuration advice,
+the Horizons/Kete spot-check results, and recommended future checks against
+both independent models and observed photometry.
+
 New-model work and results are isolated below each supplied root in
 `photometry/mpc-hm-<signature>/`. The signature includes the add-on implementation,
 model version, input configuration, color assumptions, and numerical dependency versions. The result directory contains
