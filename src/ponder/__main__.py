@@ -2,6 +2,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .comet_photometry import COMET_PHOTOMETRY_CHOICES, resolve_model
 from .runner import DEFAULT_DEBUG_FAILED_CHUNK_SIZE, DEFAULT_ISOLATE_FAILING_ROWS, run_ponder
 from .utils import get_current_orbits
 
@@ -12,6 +13,15 @@ def main():
     parser.add_argument("--orbits", type=Path, help="Path to the orbits JSON file")
     parser.add_argument("--config", type=Path, help="Path to the configuration file")
     parser.add_argument("--comet", action="store_true", help="Whether to run comet analysis")
+    parser.add_argument(
+        "--comet-photometry",
+        choices=COMET_PHOTOMETRY_CHOICES,
+        default=None,
+        help="Comet magnitude model (default for --comet: mpc-hm; legacy restores the distance-only law).",
+    )
+    parser.add_argument(
+        "--results-dir", type=Path, default=Path.cwd() / "results", help="Directory to store run results"
+    )
     parser.add_argument(
         "--work-dir", type=Path, default=Path.cwd() / "work", help="Directory to store intermediate files"
     )
@@ -87,6 +97,7 @@ def main():
     )
 
     args = parser.parse_args()
+    args.comet_photometry = resolve_model(args.comet_photometry, comet=args.comet)
     orbit_path = args.orbits
     if args.download_orbits:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -109,6 +120,9 @@ def main():
         orbit_path,
         args.config,
         comet=args.comet,
+        comet_photometry=args.comet_photometry,
+        work_dir=args.work_dir,
+        results_dir=args.results_dir,
         filter_orbits=not args.no_filter_orbits,
         chunk_size=args.chunk_size,
         sorcha_workers=args.sorcha_workers,

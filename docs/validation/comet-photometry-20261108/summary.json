@@ -1,0 +1,31 @@
+{
+  "purpose": "Independent model cross-check, not observed-flux calibration",
+  "center": "X05@399",
+  "time_conversion": "saved fieldMJD_TAI -> UTC JD",
+  "phase_quantity": "43 (true phase angle)",
+  "input_catalog": "/sdf/scratch/rubin/kbmod/ponder/comets/work/comet_orbits_24-08-2026.json",
+  "saved_source": "/tmp/ponder-hm-historical-comparison/mpc_hm.csv",
+  "n_cases": 12,
+  "versions": {
+    "sorcha-addons": "0.1.dev76+g7cfc0e9f1",
+    "sorcha": "1.2.0",
+    "sbpy": "0.6.0",
+    "numpy": "2.3.5",
+    "astropy": "7.2.0",
+    "kete": "1.1.0"
+  },
+  "max_horizons_formula_residual": 0.25771630039815463,
+  "max_replay_residual": 7.105427357601002e-15,
+  "max_geometry_magnitude_difference": 0.0009771538598589702,
+  "band_caveat": "MPC H is treated as H_r in Ponder; Horizons T-mag is visual. Removing Ponder fixed filter offsets does not establish a calibrated V-r conversion.",
+  "sources": [
+    "https://ssd.jpl.nasa.gov/horizons/manual.html",
+    "https://ssd-api.jpl.nasa.gov/doc/horizons.html",
+    "https://caltech-ipac.github.io/kete/api/flux.html",
+    "https://asteroid.lowell.edu/static/comet/dustphaseHM_table.txt"
+  ],
+  "max_kete_residual": 3.552713678800501e-15,
+  "max_lowell_phase_table_residual": 3.652234273543442e-05,
+  "max_horizons_residual_for_three_decimal_outputs": 0.00042834995389640085,
+  "n_horizons_within_printed_rounding": 12
+}

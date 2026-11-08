@@ -1,18 +1,30 @@
+import configparser
 import gzip
 import hashlib
+import io
 import json
 import os
 import signal
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from time import perf_counter
 
 import pandas as pd
 from tqdm.auto import tqdm
 
+from .comet_photometry import (
+    complex_parameters_path,
+    configured_model,
+    metadata_signature,
+    model_metadata,
+    resolve_model,
+    write_physical_inputs,
+)
 from .utils import *
 
 # TODO: should be some sort of configurable
@@ -26,6 +38,7 @@ DEFAULT_SORCHA_WORKERS = 1
 DEFAULT_DEBUG_FAILED_CHUNK_SIZE = 250
 DEFAULT_ISOLATE_FAILING_ROWS = True
 CATALOG_ROW_COLUMN = "ponder_catalog_row"
+COMET_CONFIG_SUFFIX = "_comet_no_bright_limit"
 
 # Sorcha output schemas have shifted between releases, so audits look for the
 # first usable object/time columns instead of assuming one fixed CSV shape.
@@ -51,8 +64,8 @@ OUTPUT_TIMESTAMP_COLUMNS = [
 ]
 
 
-def object_hashes(objects):
-    return {obj_id(obj): hash_orbit(obj) for obj in objects}
+def object_hashes(objects, include_photometry=False):
+    return {obj_id(obj): hash_orbit(obj, include_photometry=include_photometry) for obj in objects}
 
 
 def _state_path_token(path):
@@ -62,11 +75,14 @@ def _state_path_token(path):
     return safe[:80] or "pointings"
 
 
-def state_files_for_run(db_path, comet):
+def state_files_for_run(db_path, comet, photometry_signature=None):
     """Scope incremental state to the pointing DB and object mode."""
     mode = "comets" if comet else "asteroids"
     db_path = Path(db_path).expanduser().resolve()
-    digest = hashlib.sha256(f"{db_path}|{mode}".encode()).hexdigest()[:12]
+    identity = f"{db_path}|{mode}"
+    if photometry_signature:
+        identity += f"|photometry={photometry_signature}"
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
     stem = f"{_state_path_token(db_path)}_{mode}_{digest}"
     return Path(f"state_{stem}.json"), Path(f"element_hashes_{stem}.json")
 
@@ -93,6 +109,66 @@ def run_context_digest(db_path, config_path, comet, **metadata):
     for key in sorted(metadata):
         parts.append(f"{key}={metadata[key]}")
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
+def prepare_sorcha_config_for_mode(config_path, comet, work_dir, comet_photometry=None):
+    """Configure comet photometry and disable saturation; preserve asteroid configs."""
+    comet_photometry = resolve_model(comet_photometry, comet)
+    config_path = Path(config_path)
+    if not comet:
+        return config_path
+
+    lines = config_path.read_text().splitlines(keepends=True)
+    output_lines = []
+    in_saturation = False
+    removed = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_saturation = stripped[1:-1].strip().casefold() == "saturation"
+        if (
+            in_saturation
+            and stripped
+            and not stripped.startswith(("#", ";"))
+            and "=" in line
+            and line.split("=", 1)[0].strip().casefold() == "bright_limit"
+        ):
+            output_lines.append("# bright_limit omitted by Ponder for comet mode (no saturation cut)\n")
+            removed += 1
+            continue
+        output_lines.append(line)
+
+    suffix = config_path.suffix or ".ini"
+    effective_path = Path(work_dir) / (f"{config_path.stem}{COMET_CONFIG_SUFFIX}{suffix}")
+    content = "".join(output_lines)
+    if comet_photometry == "mpc-hm":
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read_string(content)
+        for section, key, allowed in (
+            ("PHASECURVES", "phase_function", {"none"}),
+            ("LIGHTCURVE", "lc_model", {"none"}),
+            ("ACTIVITY", "comet_activity", {"none", "mpc_hm"}),
+        ):
+            value = parser.get(section, key, fallback="none").strip().lower()
+            if value not in allowed:
+                raise ValueError(f"mpc-hm conflicts with [{section}] {key}={value}")
+        for section in ("PHASECURVES", "ACTIVITY", "EXPERT"):
+            if not parser.has_section(section):
+                parser.add_section(section)
+        parser.set("PHASECURVES", "phase_function", "none")
+        parser.set("ACTIVITY", "comet_activity", "mpc_hm")
+        parser.set("EXPERT", "brute_force", "True")
+        stream = io.StringIO()
+        parser.write(stream)
+        content = stream.getvalue()
+        effective_path = effective_path.with_name(effective_path.stem + "_mpc_hm" + suffix)
+    if not effective_path.exists() or effective_path.read_text() != content:
+        effective_path.write_text(content)
+    print(
+        f"  Comet Sorcha config — photometry: {comet_photometry}; saturation disabled; "
+        f"removed bright_limit entries: {removed}; effective config: {effective_path}"
+    )
+    return effective_path
 
 
 @dataclass(frozen=True)
@@ -160,8 +236,9 @@ def _terminate_process_group(proc):
 def run_sorcha(orbits, physparams, output, db, config, timeout=None):
     print(output.with_suffix(""))
     command = [
-        "sorcha",
-        "run",
+        sys.executable,
+        "-m",
+        "sorcha_cmdline.run",
         "-c",
         str(config),
         "--ob",
@@ -178,6 +255,11 @@ def run_sorcha(orbits, physparams, output, db, config, timeout=None):
         str(output.stem),
         "-f",
     ]
+    if configured_model(config) == "mpc-hm":
+        complex_path = complex_parameters_path(physparams)
+        if not complex_path.is_file():
+            raise FileNotFoundError(f"Missing MPC comet parameters: {complex_path}")
+        command.extend(["--cp", str(complex_path)])
     proc = subprocess.Popen(command, start_new_session=True)
     try:
         returncode = proc.wait(timeout=timeout)
@@ -189,13 +271,14 @@ def run_sorcha(orbits, physparams, output, db, config, timeout=None):
         raise subprocess.CalledProcessError(returncode, command)
 
 
-def build_id_set_inputs(objects, ids, job_name, comet):
+def build_id_set_inputs(objects, ids, job_name, comet, comet_photometry=None):
+    comet_photometry = resolve_model(comet_photometry, comet)
     if len(ids) == 0:
         print(f"  [skipping {job_name} — no objects to process]")
         return
 
     if comet:
-        orbs, phys = comets_to_sorcha_inputs(objects, ids)
+        orbs, phys = comets_to_sorcha_inputs(objects, ids, comet_photometry=comet_photometry)
     else:
         orbs, phys = mpcorb_to_sorcha_inputs(objects, ids)
 
@@ -212,7 +295,11 @@ def build_id_set_inputs(objects, ids, job_name, comet):
             f"{len(catalog_rows)} != {len(orbs)}"
         )
 
-    return orbs.reset_index(drop=True), phys.reset_index(drop=True), catalog_rows.reset_index(drop=True)
+    return (
+        orbs.reset_index(drop=True),
+        phys.reset_index(drop=True),
+        catalog_rows.reset_index(drop=True),
+    )
 
 
 def catalog_rows_for_sorcha_inputs(objects, ids, comet):
@@ -226,18 +313,7 @@ def catalog_rows_for_sorcha_inputs(objects, ids, comet):
         )
         df = df[id_col.isin(ids)].copy()
 
-        required_epoch_columns = [
-            "Epoch_year",
-            "Epoch_month",
-            "Epoch_day",
-            "Year_of_perihelion",
-            "Month_of_perihelion",
-            "Day_of_perihelion",
-        ]
-        bad = []
-        for row_index, row in df.iterrows():
-            if any(pd.isna(row.get(column)) for column in required_epoch_columns):
-                bad.append(row_index)
+        bad = [index for index, row in df.iterrows() if not valid_comet_sorcha_row(row)]
         return df.drop(bad).reset_index(drop=True)
 
     return df[df["Principal_desig"].isin(ids)].copy().reset_index(drop=True)
@@ -445,7 +521,7 @@ def write_chunk_inputs(chunk, orbs, phys):
     chunk.orbits_path.parent.mkdir(parents=True, exist_ok=True)
     chunk.physparams_path.parent.mkdir(parents=True, exist_ok=True)
     orbs.iloc[chunk.row_start : chunk.row_end].to_csv(chunk.orbits_path, index=False)
-    phys.iloc[chunk.row_start : chunk.row_end].to_csv(chunk.physparams_path, index=False)
+    write_physical_inputs(phys.iloc[chunk.row_start : chunk.row_end], chunk.physparams_path)
     return perf_counter() - started
 
 
@@ -1569,9 +1645,9 @@ def run_sorcha_chunks(
         physpar_path = WORK_DIR / f"job_{job_name}_physparams.csv"
         out_path = RESULTS_DIR / f"{time[:10]}_job_{job_name}.csv"
         orbs.to_csv(orbits_path, index=False)
-        phys.to_csv(physpar_path, index=False)
+        write_physical_inputs(phys, physpar_path)
         run_sorcha(orbits_path, physpar_path, out_path, db, config, timeout=timeout)
-        return
+        return True
 
     digest = dataframe_digest(orbs, phys)
     if context_digest:
@@ -1799,7 +1875,8 @@ def run_id_set(
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
 ):
-    inputs = build_id_set_inputs(objects, ids, job_name, comet)
+    photometry = configured_model(config) if comet else "legacy"
+    inputs = build_id_set_inputs(objects, ids, job_name, comet, comet_photometry=photometry)
     if not inputs:
         return True
 
@@ -1825,6 +1902,20 @@ def run_id_set(
     )
 
 
+def _restore_run_directories(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        global WORK_DIR, RESULTS_DIR
+        previous = WORK_DIR, RESULTS_DIR
+        try:
+            return function(*args, **kwargs)
+        finally:
+            WORK_DIR, RESULTS_DIR = previous
+
+    return wrapped
+
+
+@_restore_run_directories
 def run_ponder(
     db_path,
     object_path,
@@ -1841,8 +1932,26 @@ def run_ponder(
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
+    work_dir=None,
+    results_dir=None,
+    comet_photometry=None,
 ):
-    """Run Ponder on the given configs."""
+    """Run Ponder, using MPC/Halley–Marcus photometry by default for comets."""
+    global WORK_DIR, RESULTS_DIR
+    comet_photometry = resolve_model(comet_photometry, comet)
+    photometry = model_metadata() if comet_photometry == "mpc-hm" else None
+    if photometry:
+        photometry["input_config_sha256"] = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+    signature = metadata_signature(photometry) if photometry else None
+    if work_dir is not None:
+        WORK_DIR = Path(work_dir)
+    if results_dir is not None:
+        RESULTS_DIR = Path(results_dir)
+    if signature:
+        WORK_DIR = WORK_DIR / "photometry" / f"mpc-hm-{signature}"
+        RESULTS_DIR = RESULTS_DIR / "photometry" / f"mpc-hm-{signature}"
+    if configured_model(config_path) == "mpc-hm" and comet_photometry != "mpc-hm":
+        raise ValueError("Config selects mpc_hm; use --comet with mpc-hm photometry")
     db_path = Path(db_path)
     object_path = Path(object_path)
     config_path = Path(config_path)
@@ -1855,8 +1964,12 @@ def run_ponder(
     if isolate_failing_rows and debug_failed_chunk_size <= 0:
         raise ValueError("--isolate-failing-rows requires --debug-failed-chunk-size > 0")
 
-    WORK_DIR.mkdir(exist_ok=True)
-    RESULTS_DIR.mkdir(exist_ok=True)
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    config_path = prepare_sorcha_config_for_mode(config_path, comet, WORK_DIR, comet_photometry)
+    if photometry:
+        photometry["effective_config"] = str(config_path.resolve())
+        (RESULTS_DIR / "photometry.json").write_text(json.dumps(photometry, indent=2) + "\n")
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     catalog_snapshot_path = write_mpc_catalog_snapshot(object_path, RESULTS_DIR, ts)
@@ -1864,7 +1977,10 @@ def run_ponder(
 
     # Persisted state is scoped by DB path and object mode so runs against a
     # different pointing database do not reuse old "last_mjd" or orbit hashes.
-    state_file, hashes_file = state_files_for_run(db_path, comet)
+    state_file, hashes_file = state_files_for_run(db_path, comet, photometry_signature=signature)
+    if photometry:
+        state_file = WORK_DIR / state_file
+        hashes_file = WORK_DIR / hashes_file
     state = json.loads(state_file.read_text()) if state_file.exists() else {"last_mjd": 0.0}
     prev_hashes = json.loads(hashes_file.read_text()) if hashes_file.exists() else {}
 
@@ -1882,7 +1998,9 @@ def run_ponder(
     print(f"\n[{ts}] Starting cycle")
 
     # -- load and diff inputs --
-    new_ids, updated_ids, unchanged_ids = diff_objects(objects, prev_hashes)
+    new_ids, updated_ids, unchanged_ids = diff_objects(
+        objects, prev_hashes, include_photometry=photometry is not None
+    )
     print(
         f"  Objects — new: {len(new_ids)}  updated: {len(updated_ids)}  " f"unchanged: {len(unchanged_ids)}"
     )
@@ -1896,6 +2014,7 @@ def run_ponder(
         db_path,
         config_path,
         comet,
+        **({"photometry_signature": signature} if signature else {}),
         pointing_scope="full",
         db_max_mjd=db_last_mjd,
         db_row_count=total_pts,
@@ -1906,6 +2025,7 @@ def run_ponder(
         db_path,
         config_path,
         comet,
+        **({"photometry_signature": signature} if signature else {}),
         pointing_scope="new",
         previous_last_mjd=state["last_mjd"],
         db_max_mjd=db_last_mjd,
@@ -1984,7 +2104,7 @@ def run_ponder(
     # -- persist state for next run --
     state["last_mjd"] = db_last_mjd
     state_file.write_text(json.dumps(state))
-    hashes_file.write_text(json.dumps(object_hashes(objects)))
+    hashes_file.write_text(json.dumps(object_hashes(objects, include_photometry=photometry is not None)))
 
 
 def main():
