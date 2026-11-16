@@ -1,6 +1,11 @@
 
 # ponder
 
+> Ponder is under active development and is currently in an alpha state. Anyone
+> who uses Ponder must follow Sorcha's citation and acknowledgement requirements;
+> see the [Sorcha repository](https://github.com/dirac-institute/Sorcha) for
+> details.
+
 
 
 [![Template](https://img.shields.io/badge/Template-LINCC%20Frameworks%20Python%20Project%20Template-brightgreen)](https://lincc-ppt.readthedocs.io/en/latest/)
