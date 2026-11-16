@@ -13,6 +13,18 @@ def main():
     parser.add_argument("--config", type=Path, help="Path to the configuration file")
     parser.add_argument("--comet", action="store_true", help="Whether to run comet analysis")
     parser.add_argument(
+        "--ephemeris-only",
+        action="store_true",
+        help="Generate DECam field predictions without photometric cuts",
+    )
+    parser.add_argument("--auxiliary-data", type=Path, help="Staged Sorcha auxiliary kernel directory")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("predictions"),
+        help="Immutable run directory for --ephemeris-only",
+    )
+    parser.add_argument(
         "--work-dir", type=Path, default=Path.cwd() / "work", help="Directory to store intermediate files"
     )
     parser.add_argument(
@@ -99,6 +111,37 @@ def main():
             print(f"No database supplied; downloaded orbits to {orbit_path}. Skipping Ponder analysis.")
         else:
             print("Error: Must provide --db to run Ponder analysis")
+        return
+    if args.ephemeris_only:
+        if not args.auxiliary_data:
+            parser.error("--ephemeris-only requires --auxiliary-data")
+        if args.config or args.ignore_objects or args.ignore_object or args.force_debug_chunking:
+            parser.error(
+                "Prediction mode uses the DECam configuration and audited catalog validation; "
+                "--config, ignore lists, and forced debug chunking are not supported"
+            )
+        from concurrent.futures import ThreadPoolExecutor
+
+        from .decam_run import checkpoint, finalize, geometry, prepare
+        from .runner import parse_chunk_indices
+
+        mode = "comet" if args.comet else "non_comet"
+        manifest = prepare(
+            args.output_dir,
+            None,
+            args.auxiliary_data,
+            catalogs={mode: orbit_path},
+            filter_orbits=not args.no_filter_orbits,
+            pointing_db=args.db,
+        )
+        geometry(args.output_dir)
+        indices = parse_chunk_indices(args.only_chunks)
+        if indices is None:
+            indices = range(len(manifest["chunks"]))
+        with ThreadPoolExecutor(max_workers=max(1, args.sorcha_workers)) as pool:
+            list(pool.map(lambda i: checkpoint(args.output_dir, i), indices))
+        if args.only_chunks is None:
+            finalize(args.output_dir)
         return
     if args.comet:
         print("Running comet analysis")
