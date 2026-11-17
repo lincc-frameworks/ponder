@@ -9,7 +9,6 @@ importable in normal Python environments that do not have the LSST stack set up.
 from __future__ import annotations
 
 import argparse
-import math
 import re
 from datetime import timezone
 from itertools import repeat
@@ -77,35 +76,14 @@ def _write_csv(df: pd.DataFrame, path: str | Path) -> None:
 # --- Cone search helpers ---
 
 
-def _looks_like_radians(ra: float, dec: float) -> bool:
-    """Heuristic: Rubin metadata is sometimes in radians; treat small values as rad."""
-    if ra is None or dec is None:
-        return False
-    try:
-        ra = float(ra)
-        dec = float(dec)
-    except Exception:
-        return False
-    return (0.0 <= ra <= 2.0 * math.pi + 0.2) and (-math.pi / 2 - 0.2 <= dec <= math.pi / 2 + 0.2)
-
-
-def _ra_dec_to_deg(ra: float, dec: float) -> tuple[float, float]:
-    """Return (ra_deg, dec_deg), handling possible radian inputs."""
-    ra_f = float(ra)
-    dec_f = float(dec)
-    if _looks_like_radians(ra_f, dec_f):
-        return math.degrees(ra_f) % 360.0, math.degrees(dec_f)
-    return ra_f % 360.0, dec_f
-
-
 def _passes_cone(d: dict, cone_center: SkyCoord, cone_radius_deg: float) -> bool:
-    """Return True if record dict d is within cone; False if missing coords."""
+    """Test a Butler exposure's degree-valued tracking coordinates against a cone."""
     ra = d.get("tracking_ra")
     dec = d.get("tracking_dec")
     if ra is None or dec is None:
         return False
     try:
-        ra_deg, dec_deg = _ra_dec_to_deg(ra, dec)
+        ra_deg, dec_deg = float(ra) % 360.0, float(dec)
     except Exception:
         return False
     c = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
@@ -134,28 +112,6 @@ def _band_from_physical_filter(physical_filter: str | None) -> str:
     return ""
 
 
-def _looks_like_radians_scalar(x: float | None) -> bool:
-    if x is None:
-        return False
-    try:
-        xf = float(x)
-    except Exception:
-        return False
-    return abs(xf) <= 2.0 * math.pi + 0.2
-
-
-def _angle_to_deg(x: float | None) -> float | None:
-    if x is None:
-        return None
-    try:
-        xf = float(x)
-    except Exception:
-        return None
-    if _looks_like_radians_scalar(xf):
-        return math.degrees(xf)
-    return xf
-
-
 def make_sorcha_dataframe(df_full: pd.DataFrame) -> pd.DataFrame:
     """Create a Sorcha-formatted observations CSV dataframe from df_full.
 
@@ -163,6 +119,11 @@ def make_sorcha_dataframe(df_full: pd.DataFrame) -> pd.DataFrame:
     Seeing/depth values are fixed placeholders here because this exporter is
     meant to create a usable pointing table, not derive observing-condition
     estimates.
+
+    Input tracking_ra, tracking_dec, and sky_angle are in degrees, as defined
+    by the Butler exposure dimension schema. Radian inputs must be converted
+    before calling this function; numerical size cannot identify angle units.
+    See https://pipelines.lsst.io/v/w_2025_25/middleware/faq.html.
     """
     df = df_full.copy()
 
@@ -181,10 +142,10 @@ def make_sorcha_dataframe(df_full: pd.DataFrame) -> pd.DataFrame:
         df.get("physical_filter").map(_band_from_physical_filter) if "physical_filter" in df.columns else ""
     )
 
-    # Angles
+    # Butler exposure angles are already in degrees, even when close to zero.
     ra_deg = df.get("tracking_ra")
     dec_deg = df.get("tracking_dec")
-    rot_deg = df.get("sky_angle").map(_angle_to_deg) if "sky_angle" in df.columns else None
+    rot_deg = pd.to_numeric(df["sky_angle"], errors="coerce") if "sky_angle" in df.columns else None
 
     out = pd.DataFrame(
         {
