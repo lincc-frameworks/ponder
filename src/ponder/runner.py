@@ -11,6 +11,7 @@ from pathlib import Path
 from time import perf_counter
 
 import pandas as pd
+import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
 from .utils import *
@@ -1183,7 +1184,7 @@ def combine_csv_to_parquet(input_paths, output_path):
         if input_path.suffix == ".parquet":
             df = pd.read_parquet(input_path)
         else:
-            df = pd.read_csv(input_path)
+            df = pd.read_csv(input_path, dtype={name: str for name in OUTPUT_ID_COLUMNS})
         super_df.append(df)
 
     if not super_df:
@@ -1340,9 +1341,12 @@ def _first_present(columns, candidates):
 
 
 def _csv_columns(path):
+    if isinstance(path, str):
+        path = Path(path)
     try:
         if path.suffix == ".parquet":
-            return list(pd.read_parquet(path).columns)
+            schema = pq.read_schema(path)
+            return list(schema.names)
         else:
             return list(pd.read_csv(path, nrows=0).columns)
     except (FileNotFoundError, pd.errors.EmptyDataError):
@@ -1451,8 +1455,6 @@ def audit_output_pairs(source_paths, combined_path, output_name, catalog_rows):
 
     source_counts.rename(columns={"row_count": "source_count"}, inplace=True)
     combined_counts.rename(columns={"row_count": "combined_count"}, inplace=True)
-    print(source_counts.dtypes)
-    print(combined_counts.dtypes)
     merged = source_counts.merge(combined_counts, on=key_columns, how="left")
     merged["combined_count"] = merged["combined_count"].fillna(0).astype(int)
     missing = merged[merged["source_count"] > merged["combined_count"]].copy()
@@ -1547,6 +1549,7 @@ def run_sorcha_chunks(
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
+    completed_outputs=None,
 ):
     workers = max(1, workers)
     if len(orbs) != len(phys):
@@ -1571,7 +1574,16 @@ def run_sorcha_chunks(
         orbs.to_csv(orbits_path, index=False)
         phys.to_csv(physpar_path, index=False)
         run_sorcha(orbits_path, physpar_path, out_path, db, config, timeout=timeout)
-        return
+        if only_chunks is not None:
+            return False
+        if completed_outputs is not None:
+            ephemeris = out_path.with_name(f"{out_path.stem}_ew.csv")
+            if out_path.exists() and not ephemeris.exists():
+                raise RuntimeError("Cannot consolidate a run with missing ephemeris output")
+            combined = ephemeris.with_suffix(".parquet")
+            combine_csv_to_parquet([ephemeris], combined)
+            completed_outputs.append(combined)
+        return True
 
     digest = dataframe_digest(orbs, phys)
     if context_digest:
@@ -1737,6 +1749,8 @@ def run_sorcha_chunks(
                         f"  Output audit — missing {missing_rows} chunk output rows; "
                         f"details in {missing_path}"
                     )
+                    if completed_outputs is not None:
+                        raise RuntimeError("Output audit failed; master observations and state not updated")
                 else:
                     print("  Output audit — all chunk object/timestamp pairs are present in combined outputs")
                 visible, visible_ew, statuses = promote_combined_outputs(final_output)
@@ -1744,6 +1758,8 @@ def run_sorcha_chunks(
                     f"  Visible combined outputs — detections: {statuses['detections']} {visible}; "
                     f"ephemeris: {statuses['ephemeris']} {visible_ew}"
                 )
+                if completed_outputs is not None:
+                    completed_outputs.append(final_output.with_name(f"{final_output.stem}_ew.parquet"))
                 return True
 
         failure_text = ", ".join(f"chunk {result.chunk.index:05d}: {result.error}" for result in failures)
@@ -1770,6 +1786,8 @@ def run_sorcha_chunks(
     print(f"  Wrote output audit to {audit_path}")
     if missing_rows:
         print(f"  Output audit — missing {missing_rows} chunk output rows; details in {missing_path}")
+        if completed_outputs is not None:
+            raise RuntimeError("Output audit failed; master observations and state not updated")
     else:
         print(f"  Output audit — all chunk object/timestamp pairs are present in combined outputs")
     visible, visible_ew, statuses = promote_combined_outputs(final_output)
@@ -1777,6 +1795,8 @@ def run_sorcha_chunks(
         f"  Visible combined outputs — detections: {statuses['detections']} {visible}; "
         f"ephemeris: {statuses['ephemeris']} {visible_ew}"
     )
+    if completed_outputs is not None:
+        completed_outputs.append(final_output.with_name(f"{final_output.stem}_ew.parquet"))
     return True
 
 
@@ -1798,6 +1818,7 @@ def run_id_set(
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
+    completed_outputs=None,
 ):
     inputs = build_id_set_inputs(objects, ids, job_name, comet)
     if not inputs:
@@ -1822,6 +1843,7 @@ def run_id_set(
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
+        completed_outputs=completed_outputs,
     )
 
 
@@ -1841,6 +1863,7 @@ def run_ponder(
     debug_failed_chunk_size=DEFAULT_DEBUG_FAILED_CHUNK_SIZE,
     force_debug_chunking=False,
     isolate_failing_rows=DEFAULT_ISOLATE_FAILING_ROWS,
+    main_orbit_file=None,
 ):
     """Run Ponder on the given configs."""
     db_path = Path(db_path)
@@ -1854,6 +1877,17 @@ def run_ponder(
         raise ValueError("--force-debug-chunking requires --debug-failed-chunk-size > 0")
     if isolate_failing_rows and debug_failed_chunk_size <= 0:
         raise ValueError("--isolate-failing-rows requires --debug-failed-chunk-size > 0")
+    completed_outputs = [] if main_orbit_file is not None else None
+    if main_orbit_file is not None:
+        from .output_store import upsert_observations, validate_observation_context
+
+        main_orbit_file = Path(main_orbit_file).expanduser()
+        observation_context = {
+            "db": str(db_path.resolve()),
+            "comet": bool(comet),
+            "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+        }
+        validate_observation_context(main_orbit_file, observation_context)
 
     WORK_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -1931,6 +1965,7 @@ def run_ponder(
             debug_failed_chunk_size=debug_failed_chunk_size,
             force_debug_chunking=force_debug_chunking,
             isolate_failing_rows=isolate_failing_rows,
+            completed_outputs=completed_outputs,
         )
     else:
         unchanged_done = True
@@ -1955,6 +1990,7 @@ def run_ponder(
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
+        completed_outputs=completed_outputs,
     )
 
     updated_done = run_id_set(
@@ -1975,11 +2011,21 @@ def run_ponder(
         debug_failed_chunk_size=debug_failed_chunk_size,
         force_debug_chunking=force_debug_chunking,
         isolate_failing_rows=isolate_failing_rows,
+        completed_outputs=completed_outputs,
     )
 
-    if not unchanged_done or not new_done or not updated_done:
-        print("  Partial chunk run requested; state not updated")
+    if selected_chunks is not None or not all((unchanged_done, new_done, updated_done)):
+        print("  Partial chunk run requested; master observations and state not updated")
         return
+
+    if main_orbit_file is not None:
+        upsert_observations(
+            completed_outputs,
+            main_orbit_file,
+            observation_context,
+            OUTPUT_ID_COLUMNS,
+            OUTPUT_TIMESTAMP_COLUMNS,
+        )
 
     # -- persist state for next run --
     state["last_mjd"] = db_last_mjd

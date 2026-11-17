@@ -360,6 +360,7 @@ def test_run_ponder_runs_new_objects_against_full_db_when_no_new_pointings(tmp_p
         object_path,
         config_path,
         comet=False,
+        main_orbit_file=tmp_path / "main_observations.parquet",
         chunk_size=10,
         sorcha_workers=1,
     )
@@ -407,6 +408,7 @@ def test_run_ponder_skips_unchanged_objects_when_no_new_pointings(tmp_path, monk
         object_path,
         config_path,
         comet=False,
+        main_orbit_file=tmp_path / "main_observations.parquet",
         chunk_size=10,
         sorcha_workers=1,
     )
@@ -454,6 +456,7 @@ def test_run_ponder_ignores_legacy_global_state_files(tmp_path, monkeypatch):
         object_path,
         config_path,
         comet=False,
+        main_orbit_file=tmp_path / "main_observations.parquet",
         chunk_size=10,
         sorcha_workers=1,
     )
@@ -577,6 +580,7 @@ def test_failed_chunks_default_to_isolation_and_salvage_outputs(tmp_path, monkey
     phys = pd.DataFrame({"ObjID": ["A", "B", "C", "D"]})
     catalog_rows = pd.DataFrame({"Principal_desig": ["A", "B", "C", "D"]})
 
+    products = []
     completed = runner.run_sorcha_chunks(
         orbs,
         phys,
@@ -587,9 +591,12 @@ def test_failed_chunks_default_to_isolation_and_salvage_outputs(tmp_path, monkey
         chunk_size=2,
         workers=1,
         catalog_rows=catalog_rows,
+        completed_outputs=products,
     )
 
     assert completed is True
+    assert len(products) == 1
+    assert pd.read_parquet(products[0])["ObjID"].tolist() == ["A", "B", "C"]
     output = tmp_path / "results" / "2026-05-05_job_unchanged_and_new.parquet"
     final_rows = pd.read_parquet(output)
     assert final_rows["ObjID"].tolist() == ["A", "B", "C"]

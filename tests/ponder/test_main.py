@@ -1,7 +1,24 @@
 import re
 import sys
+from pathlib import Path
+
+import pytest
 
 from ponder import __main__ as ponder_main
+
+
+@pytest.mark.parametrize("master", [None, "custom/master.parquet"])
+def test_cli_forwards_optional_master_path(monkeypatch, master):
+    calls = []
+    argv = ["ponder", "--db", "pointings.db", "--orbits", "objects.json", "--config", "config.ini"]
+    if master:
+        argv += ["--main-orbit-file", master]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(ponder_main, "run_ponder", lambda *args, **kwargs: calls.append(kwargs))
+
+    ponder_main.main()
+
+    assert calls[0]["main_orbit_file"] == (Path(master) if master else None)
 
 
 def test_download_orbits_without_db_skips_analysis(monkeypatch, tmp_path, capsys):
