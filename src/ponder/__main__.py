@@ -14,8 +14,8 @@ def main():
     parser.add_argument(
         "--main-orbit-file",
         type=Path,
-        default=Path.cwd() / "results/main_observations.parquet",
-        help="Path to the main orbit file to diff against and update",
+        default=None,
+        help="Optional master ephemeris Parquet file to update after complete runs (one per DB/mode/config)",
     )
     parser.add_argument("--comet", action="store_true", help="Whether to run comet analysis")
     parser.add_argument(

@@ -1,6 +1,41 @@
 
 # ponder
 
+## Consolidated ephemeris observations
+
+Pass `--main-orbit-file /path/to/master.parquet` (or the optional
+`run_ponder(..., main_orbit_file=...)` keyword) to accumulate completed jobs'
+ephemeris rows in one Parquet file. The default leaves consolidation disabled.
+The supplied parent directory is created automatically. Detection filtering does
+not remove eligible ephemeris rows from this file.
+
+Each update replaces matching object/time groups, including the exposure ID when
+present, and retains unmatched prior rows. Multiplicity within incoming groups
+is preserved, and retrying the same update does not duplicate rows. This is a
+keyed upsert: it does not delete old predictions that disappear from a later
+orbit solution. Enabling it after earlier runs does not backfill their products.
+Use a new baseline when a complete recomputation is required.
+
+Selected-chunk/debug runs do not change the master or advance incremental state.
+An audit or consolidation failure also prevents state advancement. Empty jobs
+are successful and leave an existing master untouched; the master is first
+created when there are ephemeris rows to store. Recovered jobs contribute their
+successful leaves, with failed-object exclusions retained in the existing debug
+reports.
+
+Keep one master per pointing database, object population, and configuration.
+Those identities are recorded in Parquet metadata, and incompatible or untagged
+masters are rejected. Writes are serialized by a sibling `.lock` directory and
+promoted with atomic replacement. After an interrupted process, verify that no
+writer remains before removing a stale lock directory and retrying.
+
+Master updates use DuckDB joins and external sorting rather than loading the
+master into pandas. `PONDER_OUTPUT_MEMORY_LIMIT` (default `8GB`),
+`PONDER_OUTPUT_THREADS` (default `2`), and `PONDER_SPILL_DIR` (default: the master
+directory) control this stage. Leave disk space for the temporary replacement
+and spill files. These controls apply to master updates; per-job CSV assembly
+still uses pandas and is not bounded by these settings.
+
 
 
 [![Template](https://img.shields.io/badge/Template-LINCC%20Frameworks%20Python%20Project%20Template-brightgreen)](https://lincc-ppt.readthedocs.io/en/latest/)
